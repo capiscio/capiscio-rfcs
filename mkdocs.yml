@@ -1,0 +1,9 @@
+# This mkdocs.yml is used by the monorepo plugin in capiscio-docs
+# The site_name determines the URL path: /rfcs/
+
+site_name: rfcs
+
+nav:
+  - Overview: index.md
+  - RFC-001 AGCP: 001-agcp.md
+  - Contributing: CONTRIBUTING.md
