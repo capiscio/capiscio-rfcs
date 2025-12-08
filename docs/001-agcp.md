@@ -163,6 +163,4 @@ Identities and policies must be revocable mid-flight.
 
 ## Changelog
 
-- **v5.0 (2025-12-05):** Added Revocation/Kill Switch, Threat Model Summary, Latency nuance, Communication ≠ Delegation distinction
-- **v4.0:** Added SVID signing mechanics, Audit immutability guarantees
-- **v3.0:** Initial architecture definition
+- **v1.0 (2025-12-05):** Initial public release
