@@ -6,4 +6,5 @@ site_name: rfcs
 nav:
   - Overview: index.md
   - RFC-001 AGCP: 001-agcp.md
+  - RFC-002 Trust Badge Specification: 002-trust-badge.md
   - Contributing: CONTRIBUTING.md

@@ -6,7 +6,8 @@ This repository contains the technical specifications and architectural decision
 
 | RFC | Title | Status |
 |-----|-------|--------|
-| [RFC-001](rfcs/001-agcp.md) | Agent Governance Control Plane (AGCP) | Approved |
+| [RFC-001](docs/001-agcp.md) | Agent Governance Control Plane (AGCP) | ✅ Approved |
+| [RFC-002](docs/002-trust-badge.md) | Trust Badge Specification | 📝 Draft |
 
 ## RFC Process
 
