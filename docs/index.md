@@ -8,6 +8,7 @@ Request for Comments (RFCs) are the formal process for proposing and documenting
 |-----|-------|--------|
 | [RFC-001](001-agcp.md) | Agent Governance Control Plane (AGCP) | ✅ Approved |
 | [RFC-002](002-trust-badge.md) | Trust Badge Specification | ✅ Approved |
+| [RFC-003](003-key-ownership-proof.md) | Key Ownership Proof Protocol | 📝 Draft |
 
 ## RFC Process
 
