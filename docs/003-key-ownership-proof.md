@@ -1,9 +1,10 @@
 # RFC-003: Key Ownership Proof Protocol
 
 **Version:** 1.0
-**Status:** Draft
+**Status:** Approved
 **Authors:** CapiscIO Core Team
 **Created:** 2025-12-12
+**Updated:** 2025-12-18
 **Requires:** RFC-002 (Trust Badge Specification)
 
 ---
