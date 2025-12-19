@@ -1,6 +1,6 @@
 # RFC-001: Agent Governance Control Plane (AGCP)
 
-**Version:** 1.0 (Final Release Candidate)
+**Version:** 1.0
 **Status:** Approved
 **Authors:** CapiscIO Core Team
 **Created:** 2025-12-05
