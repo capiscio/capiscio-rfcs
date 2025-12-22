@@ -1,10 +1,10 @@
 # RFC-002: CapiscIO Trust Badge Specification
 
-**Version:** 1.1
+**Version:** 1.2
 **Status:** Approved
 **Authors:** CapiscIO Core Team
 **Created:** 2025-12-09
-**Updated:** 2025-12-12
+**Updated:** 2025-12-22
 **Requires:** RFC-001 (AGCP), RFC-003 (Key Ownership Proof Protocol, for IAL-1)
 
 ---
@@ -55,7 +55,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 | **Issuer** | The entity that signed the Badge, identified by the `iss` claim. For registry-backed badges, this is the CA. For self-signed badges, `iss` = `sub`. |
 | **Subject** | The agent identified by the `sub` claim (DID) |
 | **Verifier** | Any entity that validates a Badge |
-| **Trust Level** | A numeric indicator (0–4) of validation rigor. Level 0 = self-signed; levels 1–4 = registry-backed. |
+| **Trust Level** | A string indicator (`"0"`–`"4"`) of validation rigor. `"0"` = self-signed; `"1"`–`"4"` = registry-backed. Verifiers MUST treat `level` as a string; numeric parsing is not required and may cause falsiness bugs (e.g., `"0"` being truthy while `0` is falsy in some languages). |
 
 ---
 
@@ -118,9 +118,9 @@ A Trust Badge is a JWS (JSON Web Signature) in Compact Serialization format:
 | Claim | Requirement | Description |
 |-------|-------------|-------------|
 | `jti` | REQUIRED | Badge ID (UUID v4). Used for revocation and audit. |
-| `iss` | REQUIRED | Issuer URL or DID. For registry-issued badges (levels 1–4), MUST be the CA URL (e.g., `https://registry.capisc.io`). For self-signed badges (level 0), `iss` = `sub` (the agent's `did:key`). In production environments that rely on registry-backed badges, `iss` MUST identify a CA in the verifier's registry CA allowlist. Verifiers that explicitly opt into trusting self-signed level 0 badges MAY additionally allow specific `did:key` issuers that have been added to their local trust store. |
+| `iss` | REQUIRED | Issuer identifier. For registry-issued badges (levels 1–4), MUST be an **HTTPS origin URL** (e.g., `https://registry.capisc.io`). For self-signed badges (level 0), `iss` = `sub` (the agent's `did:key`). Verifiers MUST maintain a trusted issuer allowlist; for levels 1–4, only HTTPS URLs are permitted. DID-based issuers for levels 1–4 are reserved for future work. |
 | `sub` | REQUIRED | Subject DID. MUST be a valid DID identifier. For development (level 0), `sub` SHOULD be a `did:key`. For production (levels 1–4), `sub` SHOULD be a `did:web` (see §6). |
-| `aud` | OPTIONAL | Audience. Array of trust domains/services where Badge is valid. |
+| `aud` | OPTIONAL | Audience. MUST be an **array** of trust domains/services where Badge is valid. Verifiers MUST reject badges where `aud` is a string (JWT allows both; CapiscIO normalizes to array). |
 | `iat` | REQUIRED | Issued At. Unix timestamp (seconds). |
 | `exp` | REQUIRED | Expiry. Unix timestamp (seconds). |
 | `nbf` | OPTIONAL | Not Before. Unix timestamp (seconds). If present, Badge MUST NOT be accepted before this time. |
@@ -129,7 +129,7 @@ A Trust Badge is a JWS (JSON Web Signature) in Compact Serialization format:
 
 | Claim | Requirement | Description |
 |-------|-------------|-------------|
-| `key` | REQUIRED | Subject's public key (JWK). This is the **agent's signing key**, not the CA key. Verifiers use this key to verify signatures the agent produces (e.g., delegation tokens, PoP proofs). Non-production deployments MAY temporarily relax this requirement as described below. |
+| `key` | REQUIRED | Subject's public key (JWK). This is the **agent's signing key**, not the CA key. Verifiers use this key to verify signatures the agent produces (e.g., delegation tokens, PoP proofs). For IAL-0 badges, the key is **registry-attested** (bound via authenticated registration). For IAL-1 badges, the key is **PoP-attested** (bound via cryptographic proof of possession). Non-production deployments MAY temporarily relax this requirement as described below. |
 | `vc` | REQUIRED | Verifiable Credential object containing identity assertions. For level 0, `vc` MUST contain at least `credentialSubject.level = "0"`; other fields are OPTIONAL. |
 | `ial` | REQUIRED | Identity Assurance Level. `"0"` for account-attested issuance, `"1"` for proof-of-possession issuance. See §7.2.1 for definitions. |
 
@@ -186,9 +186,14 @@ For v1, implementations MUST use `cnf.kid` (not `cnf.jkt` or `cnf.jwk`):
 - `cnf.kid` MUST be a DID URL fragment referencing a `verificationMethod` in the agent's DID Document.
 - For `did:web`, this is typically `{did}#key-1` or another fragment defined in the DID Document.
 - For `did:key`, the fragment is the full multibase-encoded key: `{did}#{multibase-key}`.
-- For `ial="1"` badges, verifiers MUST resolve the DID Document and dereference `cnf.kid` to a `verificationMethod`.
+- For `ial="1"` badges, verifiers MUST resolve the DID Document (per §6.3) and dereference `cnf.kid` to a `verificationMethod`.
+- If `cnf.kid` cannot be resolved (DID resolution fails, fragment not found, or `verificationMethod` missing), verifiers MUST reject the badge with `BADGE_CLAIMS_INVALID`.
 - Verifiers MUST compare the public key material from that `verificationMethod` to the badge's embedded `key` claim. Keys match if the underlying public key bytes are equivalent after normalizing formats (e.g., `publicKeyMultibase` vs JWK `x` for Ed25519).
 - If the keys do not match exactly, the verifier MUST reject the badge with `BADGE_CLAIMS_INVALID`.
+
+**IAL-1 Retention Rule:**
+
+Agents issued IAL-1 badges MUST keep the `verificationMethod` referenced by `cnf.kid` resolvable in their DID Document until **all badges** that reference it have expired. Removing or modifying the key before badge expiry will cause verification failures for outstanding badges.
 
 **Canonical Hashing:**
 
@@ -213,6 +218,7 @@ Example: `sha256:LCa0a2j_xo_5m0U8HTBBNBNCLXBkg7-g-YpeiGJm564`
 | `vc.type` | REQUIRED | MUST include `"VerifiableCredential"` and `"AgentIdentity"`. |
 | `vc.credentialSubject.domain` | REQUIRED for levels ≥ 2 | Agent's home domain. MUST be validated according to the trust level's requirements in §5. OPTIONAL for level 1. |
 | `vc.credentialSubject.level` | REQUIRED | Trust level: `"0"`, `"1"`, `"2"`, `"3"`, or `"4"`. For level `"0"`, verifiers MUST treat this as self-asserted only and MUST NOT infer any registry validation from its presence. |
+| `vc.credentialSubject.issuance_profile` | REQUIRED for grant-minted | `"registered"` for traditional issuance, `"anonymous_dv"` for grant-minted badges (§7.2.5). Verifiers MAY use this for policy decisions. |
 
 **Extensibility:**
 
@@ -257,10 +263,24 @@ For trust level 0 (self-signed), `vc` MUST include `credentialSubject.level = "0
 
 **Verifier Behavior:**
 
-- Verifiers MUST treat `level` as opaque beyond numeric comparison.
-- Verifiers MAY enforce minimum trust levels via policy.
+- Verifiers MUST treat `level` as a string enumeration, not a number. Comparison uses the following precedence mapping:
+
+| Level | Precedence | Minimum For |
+|-------|------------|-------------|
+| `"0"` | 0 | Development only |
+| `"1"` | 1 | Internal workloads |
+| `"2"` | 2 | Production (DV) |
+| `"3"` | 3 | High-assurance |
+| `"4"` | 4 | Maximum assurance |
+
+- To enforce "minimum level X", verifiers compare `precedence(badge.level) >= precedence(X)`.
+- Verifiers MUST NOT parse level as an integer; use the mapping table.
 - Verifiers MUST NOT invent additional semantics for trust levels.
 - In production, verifiers SHOULD reject level `"0"` badges by default and MAY explicitly opt in to trust selected `did:key` issuers via local policy for tightly scoped use cases.
+
+**Production Policy Note:**
+
+Levels 0 (Self-Signed) and 1 (Registered) are suitable for development, testing, and internal workloads. Production deployments that interact with external agents SHOULD require Level 2 (DV) or higher to ensure domain ownership has been cryptographically verified.
 
 ---
 
@@ -355,14 +375,22 @@ did:web:registry.capisc.io:agents:<agent-id>
 | `agents` | Path segment | `agents` |
 | `<agent-id>` | Unique identifier (UUID or slug) | `my-agent-001` |
 
-### 6.3 `did:web` Resolution
+### 6.3 DID Resolution (Normative)
 
-Per the `did:web` specification, the DID resolves to an HTTPS URL:
+> **Canonical Reference:** All DID resolution in this specification follows this section. Other sections reference §6.3 rather than redefining resolution rules.
+
+**`did:web` Resolution:**
+
+Per the [did:web specification](https://w3c-ccg.github.io/did-method-web/), the DID resolves to an HTTPS URL:
 
 ```
 did:web:registry.capisc.io:agents:my-agent-001
   → https://registry.capisc.io/agents/my-agent-001/did.json
 ```
+
+**`did:key` Resolution:**
+
+For `did:key`, resolution is **deterministic and offline**. The public key is encoded directly in the DID; no network fetch is required. Implementations MUST decode the multibase-encoded key per the [did:key specification](https://w3c-ccg.github.io/did-method-key/).
 
 | Endpoint | URL | Path Parameter | Returns |
 |----------|-----|----------------|--------|
@@ -502,7 +530,7 @@ Agent                          Registry (CA)
   │                                 │ 5. Sign with CA private key
   │                                 │
   │  200 OK                         │
-  │  {badge: "<jws>", expiresAt: …} │
+  │  {badge: "<jws>", expires_at: …} │
   │◄────────────────────────────────│
   │                                 │
 ```
@@ -613,6 +641,305 @@ For signature verification, the CA resolves keys based on the DID method:
 
 The CA MUST NOT use the `jwks_url` from the AgentCard as the primary trust anchor. The DID Document is authoritative for key material.
 
+### 7.2.3 DV Grant Artifact
+
+A **DV Grant** is a long-lived domain validation credential that enables account-free badge minting. It decouples domain validation (performed once) from badge issuance (performed frequently).
+
+**Token Format:**
+
+DV Grants are JWS compact tokens with the following structure:
+
+```
+Header:
+{
+  "typ": "capiscio.dvgrant+jwt",
+  "alg": "EdDSA",
+  "kid": "<CA key id>"
+}
+```
+
+**Claims:**
+
+| Claim | Requirement | Description |
+|-------|-------------|-------------|
+| `iss` | REQUIRED | CA issuer URL (e.g., `"https://registry.capisc.io"`) |
+| `sub` | REQUIRED | Domain that was validated (e.g., `"api.acme.com"`) |
+| `jti` | REQUIRED | Unique grant identifier (UUID) |
+| `iat` | REQUIRED | Grant issued-at timestamp (Unix seconds) |
+| `exp` | REQUIRED | Expiration timestamp; MUST be ≤ 90 days from `iat` |
+| `aud` | REQUIRED | MUST be `"capiscio:mint"` to prevent token confusion |
+| `cnf.jkt` | REQUIRED | RFC 7638 JWK thumbprint (base64url, **no prefix**) of the bound agent public key |
+| `scope` | OPTIONAL | Allowed minting scopes (default: `["badge:dv"]`) |
+
+**Example DV Grant Payload:**
+
+```json
+{
+  "iss": "https://registry.capisc.io",
+  "sub": "api.acme.com",
+  "jti": "grant-550e8400-e29b-41d4-a716-446655440000",
+  "iat": 1703443200,
+  "exp": 1711305600,
+  "aud": "capiscio:mint",
+  "cnf": {
+    "jkt": "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
+  },
+  "scope": ["badge:dv"]
+}
+```
+
+**Validation Rules:**
+
+Verifiers processing DV Grants MUST:
+1. Verify JWS signature against CA JWKS
+2. Confirm `typ` header equals `"capiscio.dvgrant+jwt"`
+3. Confirm `aud` equals `"capiscio:mint"`
+4. Confirm `iat` is present and not in the future
+5. Confirm current time is before `exp`
+6. Check grant status via `GET {iss}/v1/badges/dv/grants/{jti}/status`
+
+**Revocation SLA:**
+
+Grant revocation SHOULD propagate to the status endpoint within 60 seconds. The minting endpoint MUST use the same data source as the status endpoint to ensure consistency.
+
+### 7.2.4 ACME-Lite Protocol
+
+The ACME-Lite protocol provides account-free domain validation for issuing DV Grants. It is intentionally minimal compared to full ACME (RFC 8555).
+
+**Order Creation:**
+
+```
+POST /v1/badges/dv/orders
+Content-Type: application/json
+
+{
+  "domain": "api.acme.com",
+  "challenge_type": "http-01",
+  "agent_public_key_jwk": { ... Ed25519 public key ... }
+}
+```
+
+**Response:**
+
+```json
+{
+  "order_id": "ord_abc123",
+  "domain": "api.acme.com",
+  "challenge": {
+    "type": "http-01",
+    "token": "LoqXcYV8...random-token",
+    "url": "http://api.acme.com/.well-known/capiscio-challenge/LoqXcYV8...",
+    "expected_content": "LoqXcYV8.sha256-thumbprint-of-agent-key"
+  },
+  "expires_at": "2025-01-15T12:00:00Z"
+}
+```
+
+**Order Constraints:**
+
+- Challenge tokens MUST be cryptographically random (≥ 128 bits entropy)
+- Tokens MUST be unique per order
+- Orders MUST expire (RECOMMENDED: 10 minutes for HTTP-01, 30 minutes for DNS-01)
+- CA SHOULD cap outstanding non-finalized orders (RECOMMENDED: 5 per domain, 20 per IP)
+- CA SHOULD rate-limit order creation by domain and source IP
+
+**Challenge Content:**
+
+The agent MUST publish: `{token}.{thumbprint}`
+
+Where `thumbprint` is the RFC 7638 SHA-256 thumbprint of `agent_public_key_jwk`, base64url-encoded without padding, **with no prefix**.
+
+**Challenge Types:**
+
+| Type | Validation Method |
+|------|-------------------|
+| `http-01` | CA fetches `http://{domain}/.well-known/capiscio-challenge/{token}` using **plain HTTP (port 80)** and verifies content matches `{token}.{thumbprint}`. Per ACME semantics, the initial request uses HTTP to avoid TLS bootstrapping issues; redirects to HTTPS are permitted within redirect rules below. |
+| `dns-01` | CA queries `_capiscio-challenge.{domain}` TXT record for `{token}.{thumbprint}` |
+
+**Challenge Security (SSRF Protections):**
+
+- CA MUST only fetch HTTP challenges on ports 80 (initial) and 443 (if redirected)
+- CA MUST NOT follow redirects by default. If redirects are permitted: max 1 redirect, same host only, HTTPS upgrade only, re-check IP allowlist on each hop
+- CA MUST resolve both A and AAAA records and validate **all** resolved IPs
+- CA MUST reject the following IP ranges:
+  - IPv4: private (RFC 1918: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), loopback (`127.0.0.0/8`), link-local (`169.254.0.0/16`), metadata (`169.254.169.254`), `0.0.0.0/8`
+  - IPv6: loopback (`::1`), private/ULA (`fc00::/7`), link-local (`fe80::/10`)
+- CA MUST re-resolve DNS immediately before fetch and reject disallowed IPs (DNS rebinding defense)
+- If redirects are permitted: max 1 redirect, same host only, HTTPS only, re-check IP allowlist on each hop
+- CA SHOULD use a dedicated egress IP range for domain validation
+
+**Order Finalization:**
+
+Once the challenge is deployed, the agent finalizes the order:
+
+```
+POST /v1/badges/dv/orders/{order_id}/finalize
+```
+
+**Finalize Processing (Normative):**
+
+1. Verify the DNS/HTTP challenge content matches expected `{token}.{thumbprint}`
+2. Issue DV Grant with:
+   - `sub` set to the validated domain
+   - `cnf.jkt` set to the thumbprint from the validated challenge
+3. CA MUST NOT resolve any DID document during finalize (DID resolution happens at minting time)
+
+**Response (on success):**
+
+```json
+{
+  "status": "valid",
+  "grant": "<DV Grant JWS>",
+  "grant_jti": "grant-550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Grant Management:**
+
+```
+GET /v1/badges/dv/grants/{jti}/status
+Authorization: Bearer <PoP proof>
+```
+
+Returns grant validity status. Requires PoP proof to prevent enumeration. If PoP verification fails or grant does not exist, returns `404 Not Found` with rate limiting.
+
+```
+POST /v1/badges/dv/grants/{jti}/revoke
+Authorization: Bearer <PoP proof>
+```
+
+Revokes the grant immediately. Requires PoP proof matching the grant's `cnf.jkt`.
+
+### 7.2.5 Grant-based Minting
+
+Agents with valid DV Grants can mint badges without registry accounts:
+
+```
+POST /v1/badges/mint
+Content-Type: application/json
+
+{
+  "grant": "<DV Grant JWS>",
+  "proof": "<PoP JWS per RFC-003>",
+  "badge_request": {
+    "sub": "did:web:api.acme.com:agents:my-agent",
+    "aud": ["https://partner.example.com"],
+    "exp_seconds": 300
+  }
+}
+```
+
+> **Authentication Shape Note:** The mint endpoint accepts PoP proof in the **request body** (`proof` field) because the grant and proof must be validated together. This differs from endpoints like `GET /v1/grants/{grant_id}/status` which use `Authorization: Bearer <PoP>` headers for authentication. Each endpoint's authentication shape is specified in its normative definition.
+
+**Mint Derivation Rules (Normative):**
+
+- `vc.credentialSubject.level` MUST be `"2"`
+- `vc.credentialSubject.issuance_profile` MUST be `"anonymous_dv"`
+- `vc.credentialSubject.domain` MUST be derived from `grant.sub` and MUST overwrite any requested domain
+- CA MUST reject if `badge_request` attempts to set `level`, `domain`, or `issuance_profile`
+
+**Minting Validation (Normative, in order):**
+
+**Phase 1: Grant Verification**
+1. Verify grant JWS signature against CA JWKS
+2. Verify grant header `typ == "capiscio.dvgrant+jwt"`
+3. Verify `grant.aud == "capiscio:mint"`
+4. Verify `grant.iat` is present and not in the future
+5. Verify `grant.exp` is in the future
+6. Verify grant is not revoked (MUST use same data source as status endpoint)
+
+**Phase 2: DID Domain Anchor Check (Pre-resolution)**
+7. Parse `badge_request.sub`
+8. Enforce `did:web` only (reject `did:key` or other methods)
+9. Enforce DID host component exactly matches `grant.sub`
+10. If mismatch, fail `400 DID_DOMAIN_MISMATCH`
+
+**Phase 3: PoP Structural and Anti-Replay Checks (RFC-003)**
+11. Parse `proof` JWS and validate structural claims (do NOT verify signature yet - no keys available)
+12. Verify PoP audience (`aud`) binds to mint endpoint URL (e.g., `https://registry.capisc.io/v1/badges/mint`)
+13. Verify `htu` and `htm` bindings per RFC-003
+14. Require `iat` and `jti` in proof; reject replayed `jti` within time window. **Retention:** CAs MUST retain proof JTIs for at least `max(120s, proof_ttl)` where `proof_ttl` is the proof's validity period (`exp - iat`).
+15. Support `nonce` if policy requires
+16. Defer cryptographic signature verification to Phase 5
+
+**Phase 4: DID Resolution**
+17. Resolve DID document for `badge_request.sub` using appropriate DID method rules:
+    - For `did:web`: Fetch `.well-known/did.json` from domain (network required)
+    - For `did:key`: Resolution is **deterministic and offline** (public key encoded in DID itself; no network fetch required)
+
+**Phase 5: Key Extraction and Signature Verification**
+18. Extract all `verificationMethod` entries from DID document
+19. For each verification method, obtain public key material from either:
+    - `publicKeyJwk`, OR
+    - `publicKeyMultibase`
+20. Normalize each to raw 32-byte Ed25519 public key bytes (see §7.2.7)
+21. Attempt to verify the PoP JWS signature using each candidate key
+22. Identify which verification method key successfully verifies the signature
+23. If multiple keys verify, select the verification method with **lexicographically smallest `id`**
+24. If none verify, fail `401 POP_VERIFICATION_FAILED`
+
+**Phase 6: Grant Binding Check**
+25. Convert selected verifying key to JWK (`kty=OKP`, `crv=Ed25519`, `x=...`) if needed
+26. Compute RFC 7638 thumbprint of that JWK (see §13.4)
+27. Compare to `grant.cnf.jkt`
+28. If mismatch, fail `400 KEY_MISMATCH`
+
+**Issued Badge Construction (Normative):**
+
+- `ial` MUST be `"1"`
+- `key` MUST be the verifying public key as JWK
+- `cnf.kid` MUST be set to the selected DID verification method `id`
+- `vc.credentialSubject.level` MUST be `"2"`
+- `vc.credentialSubject.issuance_profile` MUST be `"anonymous_dv"`
+- `vc.credentialSubject.domain` MUST be `grant.sub`
+
+**Response:**
+
+```json
+{
+  "badge": "<Badge JWS>",
+  "expires_at": "2025-01-15T12:05:00Z"
+}
+```
+
+### 7.2.6 DID Constraints for Anonymous DV
+
+For grant-based minting, the DID in the badge request MUST be anchored to the validated domain:
+
+**Valid Examples:**
+- Grant domain: `api.acme.com`
+- Valid DIDs:
+  - `did:web:api.acme.com`
+  - `did:web:api.acme.com:agents:my-agent`
+  - `did:web:api.acme.com:services:billing`
+
+**Invalid Examples:**
+- `did:web:other.acme.com` (different subdomain)
+- `did:web:acme.com` (parent domain)
+- `did:key:z6Mk...` (not anchored to domain)
+
+The CA MUST verify that the DID host component exactly matches the grant's `sub` (validated domain).
+
+### 7.2.7 Key Matching and Normalization
+
+Implementations MUST support both `publicKeyJwk` and `publicKeyMultibase` in DID documents.
+
+**Normalization Rules:**
+
+1. **If `publicKeyJwk`:**
+   - MUST be `kty=OKP`, `crv=Ed25519`, with member `x`
+   - Decode `x` (base64url) to raw 32-byte public key
+
+2. **If `publicKeyMultibase`:**
+   - Decode multibase (base58btc prefix `z`) to bytes
+   - If multicodec prefix indicates Ed25519 public key (`0xed01`), extract raw 32-byte key
+
+3. **Equivalence:** Byte-for-byte equality of raw 32-byte Ed25519 keys
+
+**Deterministic Selection:**
+
+If the DID document contains multiple verification methods with the same raw key bytes, or if multiple keys could verify a signature, selection MUST be by **lexicographically smallest verification method `id`**.
+
 ### 7.3 Renewal
 
 Badges are short-lived and MUST be renewed before expiry.
@@ -639,6 +966,10 @@ Agents MAY request a new Badge at any time via the issuance endpoint.
 **v1 Scope:**
 
 In v1 production, all registry-backed badges (levels 1–4) are issued by the CapiscIO Registry CA (`iss = "https://registry.capisc.io"`), and revocation and agent status endpoints are hosted on the same origin. Level 0 self-signed badges use `iss = sub` (the agent's `did:key`) and are not covered by registry revocation APIs—revocation for level 0 is effectively "remove the key from the local trust store" plus TTL expiry. Future RFCs MAY define additional CAs and corresponding revocation endpoints.
+
+**Status Endpoint Authority:**
+
+When online, verifiers MUST treat the status endpoint (`{iss}/v1/badges/{jti}/status` and `{iss}/v1/agents/{did}/status`) as **authoritative** for badge and agent validity. A badge that is cryptographically valid but marked `revoked` at the status endpoint MUST be rejected. Caching strategies (see §7.4.1) apply.
 
 **Revocation Semantics:**
 
@@ -754,11 +1085,12 @@ This ensures availability while maintaining security posture.
    a. Registry-issued (levels 1–4): GET {iss}/.well-known/jwks.json or use cached CA JWK. Verifiers MUST NOT dereference `{iss}` unless it is already in the trusted issuer allowlist (SSRF defense).
    b. Self-signed (level 0): Load the public key for `iss` (which equals `sub`) from the local trust store
 5. Verify signature against verification key
-6. Validate claims:
-   a. exp > current_time (not expired)
-   b. iat <= current_time (not issued in future)
-   c. iss is in verifier's trusted issuer list (for level 0, the did:key must be explicitly trusted)
-   d. aud (if present) includes verifier's identity
+6. Validate claims (with clock skew tolerance of 60 seconds):
+   a. exp > current_time - 60s (not expired, with skew tolerance)
+   b. iat <= current_time + 60s (not issued in future, with skew tolerance)
+   c. nbf (if present) <= current_time + 60s
+   d. iss is in verifier's trusted issuer list (for level 0, the did:key must be explicitly trusted)
+   e. aud (if present) includes verifier's identity
 7. Validate IAL-1 key binding (if ial="1"):
    a. Resolve the DID Document for `sub`
    b. Dereference `cnf.kid` to a `verificationMethod` in the DID Document
@@ -932,6 +1264,13 @@ Response:
 - Old keys MUST remain in JWKS until all Badges signed with them expire.
 - `kid` (Key ID) SHOULD include a date or version indicator.
 
+**Key Selection (kid missing):**
+
+When a badge header omits `kid`, verifiers MUST attempt verification with all keys in the JWKS. To prevent DoS via missing `kid`:
+- Verifiers SHOULD cap the number of key attempts (RECOMMENDED: 5)
+- Verifiers SHOULD rate-limit badge verification requests
+- Issuers SHOULD always include `kid` to avoid forcing brute-force key matching
+
 ---
 
 ## 12. API Reference
@@ -986,7 +1325,7 @@ X-Capiscio-Registry-Key: <api-key>
 {
   "badge": "<jws-token>",
   "jti": "550e8400-e29b-41d4-a716-446655440000",
-  "expiresAt": "2025-12-09T15:05:00Z"
+  "expires_at": "2025-12-09T15:05:00Z"
 }
 ```
 
@@ -1074,7 +1413,7 @@ Response (200 OK):
   "jti": "550e8400-...",
   "sub": "did:web:registry.capisc.io:agents:my-agent",
   "revoked": false,
-  "expiresAt": "2025-12-09T15:05:00Z"
+  "expires_at": "2025-12-09T15:05:00Z"
 }
 ```
 
@@ -1132,6 +1471,179 @@ Response (200 OK):
   "syncedAt": "2025-12-09T16:00:00Z"
 }
 ```
+
+### 12.6 ACME-Lite API (Anonymous DV)
+
+These endpoints implement the ACME-Lite protocol for account-free DV badge issuance.
+
+#### 12.6.1 Create Order
+
+```
+POST /v1/badges/dv/orders
+Content-Type: application/json
+
+{
+  "domain": "api.acme.com",
+  "challenge_type": "http-01",
+  "agent_public_key_jwk": { ... Ed25519 public key ... }
+}
+```
+
+**Request Fields:**
+
+| Field | Requirement | Description |
+|-------|-------------|-------------|
+| `domain` | REQUIRED | Domain to validate |
+| `challenge_type` | REQUIRED | `"http-01"` or `"dns-01"` |
+| `agent_public_key_jwk` | REQUIRED | Agent's Ed25519 public key (for grant binding) |
+
+**Response (201 Created):**
+
+```json
+{
+  "order_id": "ord_abc123",
+  "domain": "api.acme.com",
+  "challenge": {
+    "type": "http-01",
+    "token": "LoqXcYV8...random-token",
+    "url": "http://api.acme.com/.well-known/capiscio-challenge/LoqXcYV8...",
+    "expected_content": "LoqXcYV8.sha256-thumbprint-of-agent-key"
+  },
+  "expires_at": "2025-01-15T12:00:00Z"
+}
+```
+
+**Errors:**
+
+| Code | Error | Description |
+|------|-------|-------------|
+| 400 | `INVALID_DOMAIN` | Domain format invalid |
+| 400 | `INVALID_KEY` | Public key malformed or wrong algorithm |
+| 400 | `UNSUPPORTED_CHALLENGE` | Challenge type not supported |
+| 429 | `RATE_LIMIT_EXCEEDED` | Too many orders for this domain |
+
+#### 12.6.2 Finalize Order
+
+```
+POST /v1/badges/dv/orders/{order_id}/finalize
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "status": "valid",
+  "grant": "<DV Grant JWS>",
+  "grant_jti": "grant-550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Errors:**
+
+| Code | Error | Description |
+|------|-------|-------------|
+| 400 | `CHALLENGE_FAILED` | Domain validation failed |
+| 400 | `ORDER_EXPIRED` | Order has expired |
+| 404 | `ORDER_NOT_FOUND` | Order ID does not exist |
+
+#### 12.6.3 Grant Status
+
+```
+GET /v1/badges/dv/grants/{jti}/status
+Authorization: Bearer <PoP proof>
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "jti": "grant-550e8400-e29b-41d4-a716-446655440000",
+  "domain": "api.acme.com",
+  "status": "valid",
+  "expires_at": "2025-04-15T12:00:00Z"
+}
+```
+
+**Errors:**
+
+| Code | Error | Description |
+|------|-------|-------------|
+| 404 | `GRANT_NOT_FOUND` | Grant not found or PoP verification failed (prevents enumeration) |
+| 429 | `RATE_LIMIT_EXCEEDED` | Too many status checks |
+
+#### 12.6.4 Revoke Grant
+
+```
+POST /v1/badges/dv/grants/{jti}/revoke
+Authorization: Bearer <PoP proof>
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "jti": "grant-550e8400-e29b-41d4-a716-446655440000",
+  "status": "revoked",
+  "revoked_at": "2025-01-15T12:00:00Z"
+}
+```
+
+**Errors:**
+
+| Code | Error | Description |
+|------|-------|-------------|
+| 401 | `POP_VERIFICATION_FAILED` | PoP proof invalid or key mismatch |
+| 404 | `GRANT_NOT_FOUND` | Grant not found |
+| 409 | `GRANT_ALREADY_REVOKED` | Grant was already revoked |
+
+### 12.7 Grant-based Minting
+
+```
+POST /v1/badges/mint
+Content-Type: application/json
+
+{
+  "grant": "<DV Grant JWS>",
+  "proof": "<PoP JWS per RFC-003>",
+  "badge_request": {
+    "sub": "did:web:api.acme.com:agents:my-agent",
+    "aud": ["https://partner.example.com"],
+    "exp_seconds": 300
+  }
+}
+```
+
+**Request Fields:**
+
+| Field | Requirement | Description |
+|-------|-------------|-------------|
+| `grant` | REQUIRED | Valid DV Grant JWS |
+| `proof` | REQUIRED | PoP proof (RFC-003 format) proving key ownership |
+| `badge_request.sub` | REQUIRED | DID for the badge (must be anchored to grant domain) |
+| `badge_request.aud` | OPTIONAL | Badge audience claim |
+| `badge_request.exp_seconds` | OPTIONAL | Badge TTL in seconds (60-3600, default 300) |
+
+**Response (200 OK):**
+
+```json
+{
+  "badge": "<Badge JWS>",
+  "expires_at": "2025-01-15T12:05:00Z"
+}
+```
+
+**Errors:**
+
+| Code | Error | Description |
+|------|-------|-------------|
+| 400 | `GRANT_EXPIRED` | DV Grant has expired |
+| 400 | `GRANT_MISSING_IAT` | DV Grant missing `iat` claim |
+| 400 | `GRANT_INVALID_AUD` | DV Grant `aud` is not `"capiscio:mint"` |
+| 400 | `DID_DOMAIN_MISMATCH` | Requested DID not anchored to grant domain |
+| 400 | `KEY_MISMATCH` | PoP key thumbprint doesn't match grant `cnf.jkt` |
+| 401 | `GRANT_SIGNATURE_INVALID` | DV Grant JWS signature verification failed |
+| 401 | `POP_VERIFICATION_FAILED` | PoP proof invalid |
+| 403 | `GRANT_REVOKED` | DV Grant has been revoked |
 
 ---
 
@@ -1218,6 +1730,38 @@ The `X-Capiscio-Badge-JTI` header enables downstream services to correlate logs 
 
 Gateways MUST NOT make authorization decisions based solely on `sub` or other Badge claims and MUST delegate final authorization to the PDP or equivalent policy engine.
 
+### 13.4 RFC 7638 JWK Thumbprint Calculation
+
+For DV Grants, `cnf.jkt` uses RFC 7638 JWK thumbprints. For Ed25519 keys:
+
+**Step 1: Canonicalize JWK**
+
+Include ONLY these members in lexicographic order:
+```json
+{"crv":"Ed25519","kty":"OKP","x":"<base64url-public-key>"}
+```
+
+**Step 2: Compute Thumbprint**
+1. UTF-8 encode the canonical JSON (no whitespace)
+2. SHA-256 hash
+3. base64url encode without padding
+4. **No prefix** (unlike document hashes which use `sha256:`)
+
+**Example:**
+```
+Input JWK: {"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}
+Canonical: {"crv":"Ed25519","kty":"OKP","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}
+Thumbprint: kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k
+```
+
+**Contrast with Document Hashes:**
+
+| Use Case | Format | Example |
+|----------|--------|---------|
+| `cnf.jkt` (RFC 7638) | base64url, no prefix | `kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k` |
+| `agent_card_hash` | `sha256:` prefix | `sha256:LCa0a2j_xo_5m0U8HTBBNBNCLXBkg7-g-YpeiGJm564` |
+| `did_doc_hash` | `sha256:` prefix | `sha256:2H0oEw5QdKQ9DkJp6z8SxYyE9u1m0yQ9FvGq3j8Q0cU` |
+
 ---
 
 ## 14. Future Work
@@ -1229,6 +1773,8 @@ The following are explicitly out of scope for v1:
 - Hardware key binding (TPM/HSM on agent)
 - Federated trust (cross-CA)
 - Non-repudiation / audit-grade proofs
+- **Parent-domain grants:** DV Grants currently require exact domain match (`grant.sub` == DID host). Future versions may support wildcard or parent-domain grants (e.g., `*.acme.com` or `acme.com` covering `api.acme.com:agents:...`).
+- **DID-based issuers:** For levels 1–4, issuers are currently HTTPS URLs. Future versions may support DID-based issuers for decentralized CA federations.
 
 ---
 
@@ -1249,7 +1795,7 @@ curl -X POST https://registry.capisc.io/v1/agents/did%3Aweb%3Aregistry.capisc.io
 {
   "badge": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI1NTBlODQwMC1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDAiLCJpc3MiOiJodHRwczovL3JlZ2lzdHJ5LmNhcGlzYy5pbyIsInN1YiI6ImRpZDp3ZWI6cmVnaXN0cnkuY2FwaXNjLmlvOmFnZW50czpteS1hZ2VudC0wMDEiLCJpYXQiOjE3MzM3ODg4MDAsImV4cCI6MTczMzc4OTEwMCwia2V5Ijp7Imt0eSI6Ik9LUCIsImNydiI6IkVkMjU1MTkiLCJ4IjoiLi4uIn0sInZjIjp7InR5cGUiOlsiVmVyaWZpYWJsZUNyZWRlbnRpYWwiLCJBZ2VudElkZW50aXR5Il0sImNyZWRlbnRpYWxTdWJqZWN0Ijp7ImRvbWFpbiI6ImZpbmFuY2UuZXhhbXBsZS5jb20iLCJsZXZlbCI6IjEifX19.SIGNATURE",
   "jti": "550e8400-e29b-41d4-a716-446655440000",
-  "expiresAt": "2025-12-09T15:05:00Z"
+  "expires_at": "2025-12-09T15:05:00Z"
 }
 ```
 
@@ -1281,5 +1827,6 @@ curl https://api.example.com/v1/task \
 
 | Version | Date | Changes |
 |---------|-----------|---------|
+| 1.2 | 2025-12-22 | Added Anonymous DV issuance (§7.2.3-7.2.7): DV Grant artifact; ACME-Lite protocol; grant-based minting with phased validation; key normalization (§7.2.7); deterministic key selection; RFC 7638 thumbprint without prefix (§13.4); order constraints; finalize has no DID resolution; SSRF hardening; standardized error codes (§12.6-12.7). **Fixes:** Trust Level terminology (string not numeric); revocation SLA (SHOULD for timing, MUST for data source); minting validation order (signature verification deferred to Phase 5 after DID resolution); field naming normalized to `expires_at` (snake_case); `aud` MUST be array; `iss` MUST be HTTPS URL for levels 1-4; IPv6 SSRF protections; clock skew tolerance (60s); replay window retention; HTTP-01 clarification (plain HTTP per ACME); `cnf.kid` resolution failure rejection; JWKS `kid` missing DoS protections; status endpoint authority; did:key offline resolution; IAL-0 vs IAL-1 key semantics; PoP auth shape documentation. |
 | 1.1 | 2025-12-12 | Added §12.1.1 challenge endpoint; split `badge_ttl`/`challenge_ttl`; exact `htu` URL encoding; challenge replay errors; SSRF defense note; unified path parameter conventions; **IAL-1 key binding now MUST match** (bait-and-switch defense); **level 0 badges MUST be IAL-0** (self-signed IAL-1 paradox fix) |
 | 1.0 | 2025-12-09 | Initial release (Approved) |
