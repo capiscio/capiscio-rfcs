@@ -1,10 +1,10 @@
 # RFC-002: CapiscIO Trust Badge Specification
 
-**Version:** 1.2
+**Version:** 1.3
 **Status:** Approved
 **Authors:** CapiscIO Core Team
 **Created:** 2025-12-09
-**Updated:** 2025-12-22
+**Updated:** 2025-12-23
 **Requires:** RFC-001 (AGCP), RFC-003 (Key Ownership Proof Protocol, for IAL-1)
 
 ---
@@ -395,7 +395,7 @@ For `did:key`, resolution is **deterministic and offline**. The public key is en
 | Endpoint | URL | Path Parameter | Returns |
 |----------|-----|----------------|--------|
 | DID Document | `GET https://registry.capisc.io/agents/<agent-id>/did.json` | `<agent-id>` from DID path | W3C DID Document |
-| Agent API | `GET {iss}/v1/agents/{did}` | URL-encoded DID | Full agent record with AgentCard |
+| Agent API (registry-backed only) | `GET {iss}/v1/agents/{did}` | URL-encoded DID | Full agent record with AgentCard |
 
 > **Path Parameter Conventions:**
 >
@@ -563,6 +563,15 @@ The current `POST /v1/agents/{did}/badge` endpoint implements IAL-0. Badges issu
 - Prove that an authorized account holder requested the badge
 - Do NOT cryptographically prove the requester controls the agent's private key
 - Are suitable for controlled environments where account authorization is sufficient
+
+**IAL-0 Key Source (Normative):**
+
+For IAL-0 badge issuance:
+
+- The Registry MUST derive the badge's `key` claim from the agent's stored public key in the Registry database.
+- The Registry MUST NOT accept client-supplied key material in the badge request; any client-provided key MUST be ignored.
+- The agent record's public key MUST have been set through an authenticated, ownership-verified workflow (agent creation or key rotation with account authentication).
+- Implementers MUST NOT introduce API parameters that allow overriding the key source for IAL-0 badges.
 
 **Proof of Possession Issuance (IAL-1):**
 
@@ -758,15 +767,18 @@ Where `thumbprint` is the RFC 7638 SHA-256 thumbprint of `agent_public_key_jwk`,
 
 **Challenge Security (SSRF Protections):**
 
-- CA MUST only fetch HTTP challenges on ports 80 (initial) and 443 (if redirected)
-- CA MUST NOT follow redirects by default. If redirects are permitted: max 1 redirect, same host only, HTTPS upgrade only, re-check IP allowlist on each hop
-- CA MUST resolve both A and AAAA records and validate **all** resolved IPs
-- CA MUST reject the following IP ranges:
-  - IPv4: private (RFC 1918: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), loopback (`127.0.0.0/8`), link-local (`169.254.0.0/16`), metadata (`169.254.169.254`), `0.0.0.0/8`
-  - IPv6: loopback (`::1`), private/ULA (`fc00::/7`), link-local (`fe80::/10`)
-- CA MUST re-resolve DNS immediately before fetch and reject disallowed IPs (DNS rebinding defense)
-- If redirects are permitted: max 1 redirect, same host only, HTTPS only, re-check IP allowlist on each hop
-- CA SHOULD use a dedicated egress IP range for domain validation
+The verifier MUST apply all SSRF hardening requirements defined in §7.3.7, including:
+
+- Scheme allowlist (HTTP/HTTPS only), port allowlist (80/443 only)
+- Block private/loopback/link-local IP ranges (IPv4 and IPv6)
+- DNS pinning: resolve once, connect to that IP with original `Host` header
+- DNS rebinding defense: re-apply IP checks if DNS is re-resolved
+- Redirect policy: MUST NOT follow redirects (RECOMMENDED); if permitted, max 1 redirect, same-host only, re-apply all checks per hop
+- Response constraints: ≤ 1 KB body, ≤ 10s connect timeout, ≤ 30s total timeout
+- Exact path enforcement: only `/.well-known/capiscio-challenge/{token}`; reject path traversal
+- Response parsing: trim trailing newlines, exact ASCII match
+
+CA SHOULD use a dedicated egress IP range for domain validation.
 
 **Order Finalization:**
 
@@ -809,6 +821,19 @@ Authorization: Bearer <PoP proof>
 ```
 
 Revokes the grant immediately. Requires PoP proof matching the grant's `cnf.jkt`.
+
+> **Authentication Note:** The `Bearer` token in these endpoints is the **RFC-003 PoP proof JWT**, not a CapiscIO Badge. The PoP proof binds to the grant's `cnf.jkt` thumbprint and authenticates the key holder.
+
+**PoP Proof Key Resolution (Normative):**
+
+A thumbprint alone (`cnf.jkt`) does not enable signature verification. To verify a PoP proof against a grant:
+
+1. The PoP proof JWS MUST include a resolvable key reference: either a `kid` header containing a DID URL (e.g., `did:web:api.acme.com:agents:my-agent#key-1`), OR an embedded public key in the JWS header per RFC 7515 `jwk` parameter.
+2. The server MUST resolve the public key from that reference (DID resolution for `kid`, or direct extraction for embedded `jwk`).
+3. The server MUST compute the RFC 7638 thumbprint of the resolved key and compare it to `grant.cnf.jkt`.
+4. If the thumbprints do not match, the server MUST reject the request with `401 Unauthorized`.
+
+This ensures interoperable PoP verification across implementations.
 
 ### 7.2.5 Grant-based Minting
 
@@ -863,9 +888,21 @@ Content-Type: application/json
 16. Defer cryptographic signature verification to Phase 5
 
 **Phase 4: DID Resolution**
-17. Resolve DID document for `badge_request.sub` using appropriate DID method rules:
-    - For `did:web`: Fetch `.well-known/did.json` from domain (network required)
-    - For `did:key`: Resolution is **deterministic and offline** (public key encoded in DID itself; no network fetch required)
+17. Resolve DID document for `badge_request.sub` per §6.3 `did:web` rules:
+    - Path segments map to directory structure: `did:web:api.acme.com:agents:my-agent` → `https://api.acme.com/agents/my-agent/did.json`
+    - Root DIDs (no path segments) use `.well-known`: `did:web:example.com` → `https://example.com/.well-known/did.json`
+    - `did:key` and other methods are rejected (Phase 2 step 8 enforces `did:web` only)
+
+**CA did:web SSRF Hardening (Normative):**
+
+When the CA resolves `did:web` documents during grant-based minting, the CA MUST apply the same SSRF protections as HTTP-01 challenge verification (§7.3.7):
+
+- MUST fetch via HTTPS only (port 443 only)
+- MUST block private, loopback, link-local, and metadata IP ranges
+- MUST apply DNS pinning: resolve once, connect to that IP with original `Host` header
+- MUST re-apply IP checks if DNS is re-resolved (rebinding defense)
+- MUST enforce response size limits (≤ 100 KB for DID documents) and timeouts (≤ 10s)
+- MUST validate TLS certificate chain; SNI MUST match the DID domain
 
 **Phase 5: Key Extraction and Signature Verification**
 18. Extract all `verificationMethod` entries from DID document
@@ -873,9 +910,11 @@ Content-Type: application/json
     - `publicKeyJwk`, OR
     - `publicKeyMultibase`
 20. Normalize each to raw 32-byte Ed25519 public key bytes (see §7.2.7)
-21. Attempt to verify the PoP JWS signature using each candidate key
+21. Attempt to verify the PoP JWS signature using candidate keys:
+    - **If `kid` is present in the proof header:** Implementations MUST first attempt verification with the key identified by `kid`. If that key verifies the signature, select it and skip further scanning. If `kid` verification fails (key not found or signature invalid), fall back to full scan.
+    - **Full scan:** Try each candidate key in document order.
 22. Identify which verification method key successfully verifies the signature
-23. If multiple keys verify, select the verification method with **lexicographically smallest `id`**
+23. **Tie-breaker (normative):** If multiple keys verify the signature (possible during key rotation), select the verification method with **lexicographically smallest `id`**. This rule applies only when `kid` is absent or `kid` verification failed.
 24. If none verify, fail `401 POP_VERIFICATION_FAILED`
 
 **Phase 6: Grant Binding Check**
@@ -940,7 +979,290 @@ Implementations MUST support both `publicKeyJwk` and `publicKeyMultibase` in DID
 
 If the DID document contains multiple verification methods with the same raw key bytes, or if multiple keys could verify a signature, selection MUST be by **lexicographically smallest verification method `id`**.
 
-### 7.3 Renewal
+### 7.3 Persistent DV Accounts (Optional)
+
+> **Conformance Note:** This section defines an OPTIONAL feature set. RFC-002 v1.3 compliance does NOT require implementation of Persistent DV Accounts. Implementations MAY claim full RFC-002 compliance while supporting only Anonymous DV (§7.2.4). If an implementation advertises Persistent DV Account support, it MUST implement all normative requirements in §7.3.
+
+For operators unable to deploy dynamic challenge content, the Registry MAY offer **Persistent DV Accounts** that enable static server configuration. This addresses operational friction in deployments using static server configurations (nginx, Apache) or edge handlers (Cloudflare Workers, Vercel Edge) without per-renewal redeployment.
+
+#### 7.3.1 Account Creation
+
+```
+POST /v1/badges/dv/accounts
+X-Capiscio-Registry-Key: <api-key>
+Content-Type: application/json
+
+{
+  "domain": "api.acme.com",
+  "account_public_key_jwk": { ... Ed25519 public key ... }
+}
+```
+
+**Response (201 Created):**
+
+```json
+{
+  "account_id": "dva_abc123",
+  "domain": "api.acme.com",
+  "account_key_thumbprint": "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k",
+  "status": "pending",
+  "created_at": "2025-01-15T12:00:00Z"
+}
+```
+
+The `account_key_thumbprint` is computed per RFC 7638 and remains **stable for the lifetime of the account**.
+
+#### 7.3.2 Static Challenge Configuration
+
+Once an account exists, the operator configures their server to serve challenges:
+
+**HTTP-01 (nginx example):**
+
+```nginx
+location ~ ^/\.well-known/capiscio-challenge/(.+)$ {
+    # Capture token from URL path, serve {token}.{thumbprint}
+    default_type text/plain;
+    return 200 "$1.kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k";
+}
+```
+
+**DNS-01 (Delegated):**
+
+DNS-01 requires per-token TXT records, which cannot be served statically. For "configure once" DNS-01, use **delegated validation**:
+
+```
+_capiscio-challenge.api.acme.com. IN CNAME dva_abc123.capiscio-dv.net.
+```
+
+The Registry controls TXT records under `dva_abc123.capiscio-dv.net` for each verification attempt. Operators configure the CNAME once; the Registry manages the rest.
+
+> **Self-Hosted Registries:** For private or self-hosted registries, the operator MUST configure an equivalent delegated validation zone (e.g., `dv.<registry-domain>`) controlled by the Registry. The `capiscio-dv.net` zone is specific to the CapiscIO public registry.
+
+> **Note:** Non-delegated DNS-01 remains available but requires programmatic DNS updates per verification.
+
+For HTTP-01, the challenge content is **predictable**: `{any_token}.{account_thumbprint}`.
+
+#### 7.3.3 Account Verification
+
+```
+POST /v1/badges/dv/accounts/{account_id}/verify
+X-Capiscio-Registry-Key: <api-key>
+Content-Type: application/json
+
+{
+  "challenge_type": "http-01"
+}
+```
+
+The Registry:
+1. Generates a random token
+2. Fetches `http://{domain}/.well-known/capiscio-challenge/{token}` (initial request is plain HTTP per ACME semantics; redirect to HTTPS is permitted per §7.3.7 redirect policy)
+3. Expects content: `{token}.{account_key_thumbprint}`
+4. Applies SSRF hardening per §7.3.7 (including TLS validation if redirected to HTTPS)
+5. If valid, marks account as `verified`
+
+**Response (200 OK):**
+
+```json
+{
+  "account_id": "dva_abc123",
+  "status": "verified",
+  "verified_at": "2025-01-15T12:05:00Z",
+  "verified_via": "http-01"
+}
+```
+
+#### 7.3.4 Account-Based Order Creation
+
+Verified accounts can create orders without deploying new challenges:
+
+```
+POST /v1/badges/dv/orders
+X-Capiscio-Registry-Key: <api-key>
+Content-Type: application/json
+
+{
+  "account_id": "dva_abc123",
+  "agent_public_key_jwk": { ... Ed25519 public key (Agent Key) ... }
+}
+```
+
+When `account_id` is provided:
+- `domain` MUST be derived from the account (request MUST NOT include `domain`)
+- `agent_public_key_jwk` MUST be included (stored immutably on order)
+- Challenge deployment is **skipped** (account already verified)
+- Order proceeds directly to `ready` status (bypassing `pending`)
+
+**Order Status Lifecycle (Account-Based):**
+
+```
+[Account Verified] → POST /orders → ready → POST /finalize → valid
+                                        ↓
+                                     expired (if not finalized in time)
+```
+
+| Status | Description |
+|--------|-------------|
+| `ready` | Account verified; awaiting finalize |
+| `valid` | Grant issued |
+| `expired` | Order timed out before finalize |
+
+**Response (201 Created):**
+
+```json
+{
+  "order_id": "ord_xyz789",
+  "domain": "api.acme.com",
+  "status": "ready",
+  "agent_key_thumbprint": "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs",
+  "expires_at": "2025-01-15T12:10:00Z"
+}
+```
+
+#### 7.3.5 Order Finalization (Key Separation)
+
+Finalization binds the **Agent Key** (not the Account Key) to the Grant:
+
+```
+POST /v1/badges/dv/orders/{order_id}/finalize
+X-Capiscio-Registry-Key: <api-key>
+```
+
+**Key Binding Requirements (Normative):**
+
+1. Order creation MUST include `agent_public_key_jwk`
+2. Registry MUST store the Agent Key immutably on the order record
+3. Finalize MUST use the stored `agent_public_key_jwk` to compute `cnf.jkt`
+4. The API Key used for finalize MUST match the API Key that created the order
+
+**Authentication Modes:**
+
+v1.3 authenticates account/order/finalize operations via `X-Capiscio-Registry-Key`. This is appropriate when the Registry is workspace-scoped.
+
+> **Future-Proofing (OPTIONAL):** Deployments MAY additionally or alternatively authenticate orders and finalize requests via **PoP/JWS signed by the DV Account Key**. This provides ACME-like cryptographic binding without relying solely on API key authentication. This mode is OPTIONAL in v1.3 but reserved for v1.4+.
+
+> **Security Note:** The current model trusts the API Key holder to bind any Agent Key they control. For stronger guarantees (e.g., multi-party authorization), deployments MAY require a PoP signature from the Agent Key at finalize time. This is OPTIONAL in v1.3.
+
+The Grant's `cnf.jkt` is set to the RFC 7638 thumbprint of the stored `agent_public_key_jwk`.
+
+**Critical:** The DV Account Key and the Agent Key are **deliberately separate**:
+- **Account Key** anchors domain ownership proof
+- **Agent Key** (bound via `cnf.jkt`) is used for PoP when minting badges
+
+This enables:
+- Rotating Agent Keys without re-verifying the domain
+- Multiple Agents sharing a domain (each with their own Grant)
+- Keeping Account Keys in cold storage after verification
+
+#### 7.3.6 Account Management
+
+**Get Account:**
+
+```
+GET /v1/badges/dv/accounts/{account_id}
+X-Capiscio-Registry-Key: <api-key>
+```
+
+**Revoke Account:**
+
+```
+POST /v1/badges/dv/accounts/{account_id}/revoke
+X-Capiscio-Registry-Key: <api-key>
+Content-Type: application/json
+
+{
+  "reason": "Key rotation"  // Optional
+}
+```
+
+Revoking an account:
+- Sets account status to `revoked` (tombstoned, not hard-deleted)
+- Does NOT revoke existing Grants (Grants are independent artifacts)
+- Prevents future order creation using this account
+- MUST emit audit event
+
+**Account Recovery:**
+
+If the Registry API Key is lost, accounts can be recovered via domain challenge:
+
+```
+POST /v1/badges/dv/accounts/{account_id}/recover
+X-Capiscio-Registry-Key: <new-api-key>
+Content-Type: application/json
+
+{
+  "challenge_type": "http-01"
+}
+```
+
+The Registry verifies domain control using the account's stored thumbprint, then re-associates the account with the API Key from the request header.
+
+**Recovery Guardrails (Normative):**
+
+| Requirement | Level | Description |
+|-------------|-------|-------------|
+| Rate limiting | MUST | Rate limit `/recover` more aggressively than `/verify` (RECOMMENDED: 3 attempts per account per day) |
+| Status check | MUST | Reject recovery if account status is `revoked` |
+| API Key proof | MUST | New API Key MUST be provided in `X-Capiscio-Registry-Key` header (not JSON body) to prove caller controls it |
+| Audit event | MUST | Emit audit event for all recovery attempts (success and failure) |
+| Challenge freshness | SHOULD | Generate a unique challenge token for recovery; do not reuse verification tokens |
+
+#### 7.3.7 Verification Security (SSRF Hardening)
+
+The Registry verifier MUST implement these protections when fetching HTTP-01 challenges:
+
+**Network Security:**
+
+| Requirement | Level | Description |
+|-------------|-------|-------------|
+| Scheme allowlist | MUST | Only fetch `http` and `https`; reject `file:`, `ftp:`, `gopher:`, etc. |
+| Port allowlist | MUST | Only allow ports 80 (HTTP) and 443 (HTTPS); reject all other ports |
+| Block private IPv4 | MUST | Reject `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`, `0.0.0.0/8` |
+| Block private IPv6 | MUST | Reject `::1`, `fc00::/7`, `fe80::/10`, `::` |
+| DNS pinning | MUST | Resolve DNS once, select one IP, connect to that IP with original `Host` header; re-check IP against denylist immediately before `connect()` |
+| DNS rebinding defense | MUST | If DNS is re-resolved for any reason, re-apply all IP checks before proceeding |
+
+**Redirect Policy:**
+
+| Requirement | Level | Description |
+|-------------|-------|-------------|
+| Redirect handling | MUST | **MUST NOT follow redirects** (RECOMMENDED). If redirects are permitted: MUST limit to 1 redirect, MUST enforce same-host only, MUST re-apply all IP/port/scheme checks on every hop |
+| Cross-host redirects | MUST | Reject any redirect to a different host |
+
+**TLS and Response:**
+
+| Requirement | Level | Description |
+|-------------|-------|-------------|
+| TLS validation | MUST | If following HTTPS, MUST validate certificate chain and SNI MUST match the target domain |
+| Timeout | MUST | ≤ 10 seconds connection timeout, ≤ 30 seconds total request timeout |
+| Response size | MUST | ≤ 1 KB response body; reject larger responses |
+| Response parsing | MUST | Trim trailing `\r\n` or `\n`; compare exact ASCII string match against expected `{token}.{thumbprint}` |
+| Exact path | MUST | Only fetch paths under `/.well-known/capiscio-challenge/`; reject path traversal (`..`, encoded variants) |
+
+#### 7.3.8 Account Constraints
+
+| Constraint | Value | Notes |
+|------------|-------|-------|
+| Accounts per Registry Key | 100 | Prevents abuse |
+| Verification attempts per hour | 10 | Rate limiting |
+| Account verification validity | Indefinite | Until account revoked; workspaces MAY enforce re-verification policy |
+| Account key algorithm | Ed25519 | MUST match RFC-002 §4.2 (`alg: EdDSA`) |
+| Audit logging | REQUIRED | Account create, verify, revoke, order create, finalize MUST emit audit events |
+
+#### 7.3.9 Relationship to Anonymous DV (§7.2.4)
+
+| Flow | Account Required | Challenge Deployment | Use Case |
+|------|-----------------|---------------------|----------|
+| Anonymous DV (§7.2.4) | No | Per-order | Privacy-first, CI/CD capable |
+| Account-Based DV (§7.3) | Yes | Once per account | Static servers, manual ops |
+
+Both flows produce identical DV Grants. The **only difference** is the challenge deployment model:
+- Anonymous: New challenge content per order
+- Account: Stable challenge content using account thumbprint
+
+**Privacy Note:** Account-based DV links orders to a Registry API Key. Operators requiring unlinkability SHOULD use Anonymous DV with programmatic challenge deployment.
+
+### 7.4 Renewal
 
 Badges are short-lived and MUST be renewed before expiry.
 
@@ -961,7 +1283,7 @@ capiscio badge keep \
 
 Agents MAY request a new Badge at any time via the issuance endpoint.
 
-### 7.4 Revocation
+### 7.5 Revocation
 
 **v1 Scope:**
 
@@ -969,7 +1291,7 @@ In v1 production, all registry-backed badges (levels 1–4) are issued by the Ca
 
 **Status Endpoint Authority:**
 
-When online, verifiers MUST treat the status endpoint (`{iss}/v1/badges/{jti}/status` and `{iss}/v1/agents/{did}/status`) as **authoritative** for badge and agent validity. A badge that is cryptographically valid but marked `revoked` at the status endpoint MUST be rejected. Caching strategies (see §7.4.1) apply.
+When online, verifiers MUST treat the status endpoint (`{iss}/v1/badges/{jti}/status` and `{iss}/v1/agents/{did}/status`) as **authoritative** for badge and agent validity. A badge that is cryptographically valid but marked `revoked` at the status endpoint MUST be rejected. Caching strategies (see §7.5.1) apply.
 
 **Revocation Semantics:**
 
@@ -1053,13 +1375,21 @@ Response:
 
 **Cache Staleness Guidance:**
 
+**Named Constants (Normative):**
+
+| Constant | Default Value | Description |
+|----------|---------------|-------------|
+| `REVOCATION_CACHE_MAX_STALENESS` | 300 seconds (5 minutes) | Maximum age of revocation cache before sync required |
+| `BADGE_CLOCK_SKEW_TOLERANCE` | 60 seconds | Already defined in §8.1 step 6 |
+
 Verifiers operating in offline or semi-connected mode MUST:
 
 1. Prioritize the `jti` check from their local revocation cache.
-2. If the cache is stale (older than a configured threshold, default 5 minutes) AND network is available, attempt to sync revocations before treating a previously unseen `jti` as valid.
-3. If sync fails, verifiers MAY proceed with the stale cache for badges within their TTL window, but SHOULD log a warning.
+2. If the cache is stale (older than `REVOCATION_CACHE_MAX_STALENESS`) AND network is available, attempt to sync revocations before treating a previously unseen `jti` as valid.
+3. **Fail-closed default (normative):** If sync fails and the cache is stale, verifiers MUST reject badges for trust levels 2–4 with error `REVOCATION_CHECK_FAILED`. Verifiers MAY proceed with stale cache only for levels 0–1 or when explicitly configured for fail-open mode.
+4. Implementations MAY configure a longer `REVOCATION_CACHE_MAX_STALENESS` for air-gapped deployments, but MUST document the deviation and its security implications.
 
-This ensures availability while maintaining security posture.
+This ensures consistent security posture across implementations while allowing operational flexibility for edge cases.
 
 ---
 
@@ -1098,7 +1428,7 @@ This ensures availability while maintaining security posture.
    d. If keys do not match exactly (same key bytes after format normalization), reject with BADGE_CLAIMS_INVALID
 8. Check revocation status (registry-issued only):
    a. Online: GET {iss}/v1/badges/{jti}/status
-   b. Offline: Check local revocation cache (see §7.4 Cache Staleness)
+   b. Offline: Check local revocation cache (see §7.5 Cache Staleness)
 9. Check agent status (registry-issued only):
    a. Online: GET {iss}/v1/agents/{did}/status
    b. Offline: Consult locally cached agent status
@@ -1139,7 +1469,22 @@ When an agent uses a Badge to authenticate to the Registry API itself (e.g., to 
 
 Agents managing their own Registry records SHOULD request badges with `aud: ["https://registry.capisc.io"]` for defense-in-depth.
 
-### 8.4 Error Codes
+### 8.4 Verifier SSRF Protections (did:web Resolution)
+
+Verifiers resolving `did:web` DID Documents are exposed to SSRF risks similar to CA domain validation. Verifiers SHOULD implement the following protections:
+
+| Requirement | Level | Description |
+|-------------|-------|-------------|
+| Scheme enforcement | SHOULD | Only fetch `https` for `did:web` resolution; reject `http`, `file:`, etc. |
+| Port allowlist | SHOULD | Only allow port 443 for `did:web` resolution |
+| Block private ranges | SHOULD | Reject private, loopback, link-local, and metadata IP ranges (per §7.3.7) |
+| TLS validation | SHOULD | Validate certificate chain; SNI MUST match the DID domain |
+| Response limits | SHOULD | Cap response size (RECOMMENDED: ≤ 100 KB) and enforce sane timeouts (RECOMMENDED: ≤ 10s) |
+| Trusted issuer check | MUST | Per §8.1 step 4a, verifiers MUST NOT dereference `{iss}` unless already in trusted issuer allowlist |
+
+> **Rationale:** While the CA has strict SSRF requirements (MUST), verifiers operate in diverse environments. SHOULD-level requirements balance security with operational flexibility. Verifiers in high-security environments SHOULD treat these as MUST.
+
+### 8.5 Error Codes
 
 | Error | Description |
 |-------|-------------|
@@ -1151,7 +1496,7 @@ Agents managing their own Registry records SHOULD request badges with `aud: ["ht
 | `BADGE_AUDIENCE_MISMATCH` | Verifier not in `aud` |
 | `BADGE_REVOKED` | Badge `jti` is on revocation list |
 | `BADGE_CLAIMS_INVALID` | Required claims missing or malformed |
-| `BADGE_AGENT_DISABLED` | Agent `sub` is disabled (see §7.4). Applies only to registry-issued badges (levels 1–4). Level 0 self-signed badges are not tracked in the registry and cannot be "disabled" via registry status. |
+| `BADGE_AGENT_DISABLED` | Agent `sub` is disabled (see §7.5). Applies only to registry-issued badges (levels 1–4). Level 0 self-signed badges are not tracked in the registry and cannot be "disabled" via registry status. |
 
 These are spec-level error codes, not HTTP status codes. Gateways and libraries MAY expose these as machine-readable error codes in JSON responses or logs:
 
@@ -1596,6 +1941,167 @@ Authorization: Bearer <PoP proof>
 | 404 | `GRANT_NOT_FOUND` | Grant not found |
 | 409 | `GRANT_ALREADY_REVOKED` | Grant was already revoked |
 
+#### 12.6.5 Create DV Account
+
+```
+POST /v1/badges/dv/accounts
+X-Capiscio-Registry-Key: <api-key>
+Content-Type: application/json
+
+{
+  "domain": "api.acme.com",
+  "account_public_key_jwk": { ... Ed25519 public key ... }
+}
+```
+
+**Response (201 Created):**
+
+```json
+{
+  "account_id": "dva_abc123",
+  "domain": "api.acme.com",
+  "account_key_thumbprint": "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k",
+  "status": "pending",
+  "created_at": "2025-01-15T12:00:00Z"
+}
+```
+
+**Errors:**
+
+| Code | Error | Description |
+|------|-------|-------------|
+| 400 | `INVALID_DOMAIN` | Domain format invalid |
+| 400 | `INVALID_KEY` | Public key malformed or wrong algorithm |
+| 401 | `UNAUTHORIZED` | Missing or invalid API key |
+| 409 | `ACCOUNT_EXISTS` | Account already exists for this domain/key |
+| 429 | `RATE_LIMIT_EXCEEDED` | Too many accounts for this API key |
+
+#### 12.6.6 Get DV Account
+
+```
+GET /v1/badges/dv/accounts/{account_id}
+X-Capiscio-Registry-Key: <api-key>
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "account_id": "dva_abc123",
+  "domain": "api.acme.com",
+  "account_key_thumbprint": "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k",
+  "status": "verified",
+  "verified_at": "2025-01-15T12:05:00Z",
+  "verified_via": "http-01",
+  "created_at": "2025-01-15T12:00:00Z"
+}
+```
+
+**Errors:**
+
+| Code | Error | Description |
+|------|-------|-------------|
+| 401 | `UNAUTHORIZED` | Missing or invalid API key |
+| 404 | `ACCOUNT_NOT_FOUND` | Account not found or not owned by this API key |
+
+#### 12.6.7 Verify DV Account
+
+```
+POST /v1/badges/dv/accounts/{account_id}/verify
+X-Capiscio-Registry-Key: <api-key>
+Content-Type: application/json
+
+{
+  "challenge_type": "http-01"
+}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "account_id": "dva_abc123",
+  "status": "verified",
+  "verified_at": "2025-01-15T12:05:00Z",
+  "verified_via": "http-01"
+}
+```
+
+**Errors:**
+
+| Code | Error | Description |
+|------|-------|-------------|
+| 400 | `CHALLENGE_FAILED` | Domain verification failed |
+| 400 | `UNSUPPORTED_CHALLENGE` | Challenge type not supported |
+| 401 | `UNAUTHORIZED` | Missing or invalid API key |
+| 404 | `ACCOUNT_NOT_FOUND` | Account not found |
+| 409 | `ACCOUNT_ALREADY_VERIFIED` | Account already verified |
+| 429 | `RATE_LIMIT_EXCEEDED` | Too many verification attempts |
+
+#### 12.6.8 Revoke DV Account
+
+```
+POST /v1/badges/dv/accounts/{account_id}/revoke
+X-Capiscio-Registry-Key: <api-key>
+Content-Type: application/json
+
+{
+  "reason": "Key rotation"  // Optional
+}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "account_id": "dva_abc123",
+  "status": "revoked",
+  "revoked_at": "2025-01-15T12:00:00Z"
+}
+```
+
+**Errors:**
+
+| Code | Error | Description |
+|------|-------|-------------|
+| 401 | `UNAUTHORIZED` | Missing or invalid API key |
+| 404 | `ACCOUNT_NOT_FOUND` | Account not found |
+| 409 | `ACCOUNT_ALREADY_REVOKED` | Account already revoked |
+
+#### 12.6.9 Recover DV Account
+
+```
+POST /v1/badges/dv/accounts/{account_id}/recover
+X-Capiscio-Registry-Key: <new-api-key>
+Content-Type: application/json
+
+{
+  "challenge_type": "http-01"
+}
+```
+
+The Registry verifies domain control using the account's stored thumbprint, then re-associates the account with the API Key from the request header.
+
+**Response (200 OK):**
+
+```json
+{
+  "account_id": "dva_abc123",
+  "status": "verified",
+  "recovered_at": "2025-01-15T12:00:00Z"
+}
+```
+
+**Errors:**
+
+| Code | Error | Description |
+|------|-------|-------------|
+| 400 | `CHALLENGE_FAILED` | Domain verification failed |
+| 401 | `UNAUTHORIZED` | Missing or invalid API key |
+| 404 | `ACCOUNT_NOT_FOUND` | Account not found |
+| 409 | `ACCOUNT_REVOKED` | Cannot recover a revoked account |
+| 429 | `RATE_LIMIT_EXCEEDED` | Too many recovery attempts (3 per account per day) |
+
 ### 12.7 Grant-based Minting
 
 ```
@@ -1764,7 +2270,62 @@ Thumbprint: kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k
 
 ---
 
-## 14. Future Work
+## 14. Conformance
+
+### 14.1 Verifier Conformance
+
+A verifier implementation is **RFC-002 compliant** if it correctly implements:
+
+1. **§8.1 Verification Flow** (all steps for the supported trust levels)
+2. **§9 Transport** (badge header parsing)
+3. **§11 Security Considerations** (relevant protections)
+4. **Revocation checks** for trust levels 1–4 (§7.5, including staleness handling)
+
+Verifiers MAY claim partial compliance by specifying supported trust levels (e.g., "RFC-002 compliant for levels 0–2").
+
+### 14.2 Issuer/CA Conformance
+
+A CA implementation is **RFC-002 compliant** if it correctly implements:
+
+1. **§4 Badge Structure** (all normative claims)
+2. **§7.2 Issuance** (including IAL-0 key source rules and IAL-1 PoP validation)
+3. **§7.5 Revocation** (revocation propagation SLA)
+4. **SSRF hardening** per §7.3.7 for all domain validation and DID resolution
+
+### 14.3 Optional Features
+
+The following features are OPTIONAL for RFC-002 v1.3 compliance:
+
+| Feature | Section | Notes |
+|---------|---------|-------|
+| Persistent DV Accounts | §7.3 | Full compliance without this feature is valid |
+| Anonymous DV (grant-based minting) | §7.2.3–7.2.7 | Required only if issuing DV badges without registry accounts |
+| `agent_card_hash` / `did_doc_hash` | §4.3.3 | Telemetry hints only; verifiers MUST treat as informational |
+
+### 14.4 Test Vectors
+
+Implementations SHOULD validate against the following scenarios:
+
+| # | Scenario | Expected Result |
+|---|----------|-----------------|
+| 1 | `aud` is a string instead of array | REJECT (`BADGE_CLAIMS_INVALID`) |
+| 2 | `vc.credentialSubject.level` is `"0"` with `ial="1"` | REJECT (`BADGE_CLAIMS_INVALID`) |
+| 3 | `ial="0"` with `cnf` claim present | REJECT (`BADGE_CLAIMS_INVALID`) |
+| 4 | `ial="1"` with `cnf` claim missing | REJECT (`BADGE_CLAIMS_INVALID`) |
+| 5 | `cnf.kid` references non-existent verification method | REJECT (`BADGE_CLAIMS_INVALID`) |
+| 6 | `cnf.kid` key bytes ≠ `key` claim bytes (after normalization) | REJECT (`BADGE_CLAIMS_INVALID`) |
+| 7 | Badge `jti` appears on revocation list | REJECT (`BADGE_REVOKED`) |
+| 8 | Agent `sub` status is `disabled` | REJECT (`BADGE_AGENT_DISABLED`) |
+| 9 | `exp` < current_time (no clock skew tolerance remaining) | REJECT (`BADGE_EXPIRED`) |
+| 10 | `iss` not in verifier's trusted issuer list | REJECT (`BADGE_ISSUER_UNTRUSTED`) |
+| 11 | Signature does not verify against `{iss}` CA key | REJECT (`BADGE_SIGNATURE_INVALID`) |
+| 12 | Valid badge with all claims correct | ACCEPT |
+
+Detailed test vectors with actual JWS tokens will be published in the `capiscio-rfcs` repository under `/test-vectors/002/`.
+
+---
+
+## 15. Future Work
 
 The following are explicitly out of scope for v1:
 
@@ -1827,6 +2388,7 @@ curl https://api.example.com/v1/task \
 
 | Version | Date | Changes |
 |---------|-----------|---------|
-| 1.2 | 2025-12-22 | Added Anonymous DV issuance (§7.2.3-7.2.7): DV Grant artifact; ACME-Lite protocol; grant-based minting with phased validation; key normalization (§7.2.7); deterministic key selection; RFC 7638 thumbprint without prefix (§13.4); order constraints; finalize has no DID resolution; SSRF hardening; standardized error codes (§12.6-12.7). **Fixes:** Trust Level terminology (string not numeric); revocation SLA (SHOULD for timing, MUST for data source); minting validation order (signature verification deferred to Phase 5 after DID resolution); field naming normalized to `expires_at` (snake_case); `aud` MUST be array; `iss` MUST be HTTPS URL for levels 1-4; IPv6 SSRF protections; clock skew tolerance (60s); replay window retention; HTTP-01 clarification (plain HTTP per ACME); `cnf.kid` resolution failure rejection; JWKS `kid` missing DoS protections; status endpoint authority; did:key offline resolution; IAL-0 vs IAL-1 key semantics; PoP auth shape documentation. |
-| 1.1 | 2025-12-12 | Added §12.1.1 challenge endpoint; split `badge_ttl`/`challenge_ttl`; exact `htu` URL encoding; challenge replay errors; SSRF defense note; unified path parameter conventions; **IAL-1 key binding now MUST match** (bait-and-switch defense); **level 0 badges MUST be IAL-0** (self-signed IAL-1 paradox fix) |
+| 1.3 | 2025-12-23 | **Added:** Persistent DV Accounts (§7.3, OPTIONAL); Conformance section (§14) with test vectors. **Fixed:** IAL-0 key source rules; PoP key resolution anchor; CA did:web SSRF (MUST); `kid` selection semantics; staleness fail-closed default; Phase 4 DID resolution; SSRF baseline unified. |
+| 1.2 | 2025-12-22 | **Added:** Anonymous DV issuance (§7.2.3–7.2.7); ACME-Lite protocol; grant-based minting; SSRF hardening; error codes (§12.6–12.7). **Fixed:** Trust level as string; `aud` as array; `iss` HTTPS for levels 1–4; clock skew; replay retention; IAL semantics. |
+| 1.1 | 2025-12-12 | **Added:** Challenge endpoint (§12.1.1). **Fixed:** IAL-1 key binding MUST match; level 0 MUST be IAL-0; `htu` encoding; path conventions. |
 | 1.0 | 2025-12-09 | Initial release (Approved) |
