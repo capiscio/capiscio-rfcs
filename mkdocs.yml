@@ -7,4 +7,7 @@ nav:
   - Overview: index.md
   - RFC-001 AGCP: 001-agcp.md
   - RFC-002 Trust Badge Specification: 002-trust-badge.md
+  - RFC-003 Key Ownership Proof: 003-key-ownership-proof.md
+  - RFC-004 Transaction Hop Binding: 004-tchb-transaction-hop-binding.md
+  - RFC-005 Policy Framework: 005-policy-definition-distribution-enforcement.md
   - Contributing: CONTRIBUTING.md
