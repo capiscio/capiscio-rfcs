@@ -1,10 +1,10 @@
 # RFC-002: CapiscIO Trust Badge Specification
 
-**Version:** 1.3
+**Version:** 1.4
 **Status:** Approved
 **Authors:** CapiscIO Core Team
 **Created:** 2025-12-09
-**Updated:** 2025-12-23
+**Updated:** 2026-01-02
 **Requires:** RFC-001 (AGCP), RFC-003 (Key Ownership Proof Protocol, for IAL-1)
 
 ---
@@ -713,13 +713,24 @@ Grant revocation SHOULD propagate to the status endpoint within 60 seconds. The 
 
 ### 7.2.4 ACME-Lite Protocol
 
-The ACME-Lite protocol provides account-free domain validation for issuing DV Grants. It is intentionally minimal compared to full ACME (RFC 8555).
+The ACME-Lite protocol provides domain validation for issuing DV Grants. It is intentionally minimal compared to full ACME (RFC 8555).
+
+**Authentication Policy:**
+
+Registries MAY accept unauthenticated DV order creation. Registries MAY require authentication (e.g., API key, OAuth token); clients MUST handle `401 Unauthorized` or `403 Forbidden` responses and retry with credentials when required.
+
+> **Hosted Registry Policy:** The CapiscIO hosted registry (`registry.capisc.io`) requires authentication (`X-Capiscio-Registry-Key` header) for DV order creation. Orders count against the account's domain verification quota per the active subscription tier.
+
+**Domain Ownership Policy:**
+
+Registries SHOULD prevent the same domain from being verified by multiple accounts simultaneously. A domain verification by Account A SHOULD block Account B from verifying the same domain until Account A's grant expires or is revoked. This prevents domain squatting and ensures clear ownership provenance.
 
 **Order Creation:**
 
 ```
 POST /v1/badges/dv/orders
 Content-Type: application/json
+X-Capiscio-Registry-Key: <api-key> (if required by registry)
 
 {
   "domain": "api.acme.com",
@@ -959,6 +970,8 @@ For grant-based minting, the DID in the badge request MUST be anchored to the va
 
 The CA MUST verify that the DID host component exactly matches the grant's `sub` (validated domain).
 
+**Exact-Match Requirement (Normative):** Domain validation for `api.acme.com` MUST be treated as validation for that exact fully-qualified domain name only. It MUST NOT be interpreted as validation for parent domains (e.g., `acme.com`), sibling subdomains (e.g., `other.acme.com`), or wildcards (e.g., `*.acme.com`).
+
 ### 7.2.7 Key Matching and Normalization
 
 Implementations MUST support both `publicKeyJwk` and `publicKeyMultibase` in DID documents.
@@ -981,7 +994,7 @@ If the DID document contains multiple verification methods with the same raw key
 
 ### 7.3 Persistent DV Accounts (Optional)
 
-> **Conformance Note:** This section defines an OPTIONAL feature set. RFC-002 v1.3 compliance does NOT require implementation of Persistent DV Accounts. Implementations MAY claim full RFC-002 compliance while supporting only Anonymous DV (§7.2.4). If an implementation advertises Persistent DV Account support, it MUST implement all normative requirements in §7.3.
+> **Conformance Note:** This section defines an OPTIONAL feature set. RFC-002 v1.4 compliance does NOT require implementation of Persistent DV Accounts. Implementations MAY claim full RFC-002 compliance while supporting only Anonymous DV (§7.2.4). If an implementation advertises Persistent DV Account support, it MUST implement all normative requirements in §7.3.
 
 For operators unable to deploy dynamic challenge content, the Registry MAY offer **Persistent DV Accounts** that enable static server configuration. This addresses operational friction in deployments using static server configurations (nginx, Apache) or edge handlers (Cloudflare Workers, Vercel Edge) without per-renewal redeployment.
 
@@ -2294,7 +2307,7 @@ A CA implementation is **RFC-002 compliant** if it correctly implements:
 
 ### 14.3 Optional Features
 
-The following features are OPTIONAL for RFC-002 v1.3 compliance:
+The following features are OPTIONAL for RFC-002 v1.4 compliance:
 
 | Feature | Section | Notes |
 |---------|---------|-------|
@@ -2304,24 +2317,11 @@ The following features are OPTIONAL for RFC-002 v1.3 compliance:
 
 ### 14.4 Test Vectors
 
-Implementations SHOULD validate against the following scenarios:
+Implementations SHOULD validate against the minimum scenarios defined in §16.
 
-| # | Scenario | Expected Result |
-|---|----------|-----------------|
-| 1 | `aud` is a string instead of array | REJECT (`BADGE_CLAIMS_INVALID`) |
-| 2 | `vc.credentialSubject.level` is `"0"` with `ial="1"` | REJECT (`BADGE_CLAIMS_INVALID`) |
-| 3 | `ial="0"` with `cnf` claim present | REJECT (`BADGE_CLAIMS_INVALID`) |
-| 4 | `ial="1"` with `cnf` claim missing | REJECT (`BADGE_CLAIMS_INVALID`) |
-| 5 | `cnf.kid` references non-existent verification method | REJECT (`BADGE_CLAIMS_INVALID`) |
-| 6 | `cnf.kid` key bytes ≠ `key` claim bytes (after normalization) | REJECT (`BADGE_CLAIMS_INVALID`) |
-| 7 | Badge `jti` appears on revocation list | REJECT (`BADGE_REVOKED`) |
-| 8 | Agent `sub` status is `disabled` | REJECT (`BADGE_AGENT_DISABLED`) |
-| 9 | `exp` < current_time (no clock skew tolerance remaining) | REJECT (`BADGE_EXPIRED`) |
-| 10 | `iss` not in verifier's trusted issuer list | REJECT (`BADGE_ISSUER_UNTRUSTED`) |
-| 11 | Signature does not verify against `{iss}` CA key | REJECT (`BADGE_SIGNATURE_INVALID`) |
-| 12 | Valid badge with all claims correct | ACCEPT |
+Canonical, machine-consumable test vector artifacts (e.g., JSON inputs, JWS tokens, expected outputs) are maintained in the `capiscio-e2e-tests` repository under `test-data/rfc-002-trust-badge/`.
 
-Detailed test vectors with actual JWS tokens will be published in the `capiscio-rfcs` repository under `/test-vectors/002/`.
+**Path Stability (Normative):** The path `test-data/rfc-002-trust-badge/` MUST remain stable across releases. SDK CI pipelines MAY depend on this path. Breaking changes to the path structure require a major version bump and migration guide.
 
 ---
 
@@ -2336,6 +2336,76 @@ The following are explicitly out of scope for v1:
 - Non-repudiation / audit-grade proofs
 - **Parent-domain grants:** DV Grants currently require exact domain match (`grant.sub` == DID host). Future versions may support wildcard or parent-domain grants (e.g., `*.acme.com` or `acme.com` covering `api.acme.com:agents:...`).
 - **DID-based issuers:** For levels 1–4, issuers are currently HTTPS URLs. Future versions may support DID-based issuers for decentralized CA federations.
+
+---
+
+## 16. Development and Testing
+
+This section defines interoperability conventions for development and CI environments.
+
+### 16.1 Reserved Domains for Test Artifacts
+
+Implementations SHOULD use reserved domains in test artifacts to prevent accidental network access. In particular, `.invalid` is reserved for this purpose (RFC 2606).
+
+**Examples (non-normative):**
+- Issuer: `https://registry.capisc.invalid`
+- Subject: `did:web:example.invalid:agents:my-agent`
+- Audience: `https://api.example.invalid`
+
+### 16.2 Test Vector Contract
+
+The following test vectors define the minimum interoperability surface for RFC-002.
+
+Implementations SHOULD support all vectors applicable to the trust levels they claim to support. Vectors for trust levels 3 and 4 are only applicable if the implementation advertises support for those levels.
+
+| ID | Scenario | Expected Result |
+|----|----------|-----------------|
+| TV-001 | `aud` is not an array | REJECT (`BADGE_CLAIMS_INVALID`) |
+| TV-002 | `vc.credentialSubject.level` is `"0"` with `ial="1"` | REJECT (`BADGE_CLAIMS_INVALID`) |
+| TV-003 | `ial="0"` with `cnf` claim present | REJECT (`BADGE_CLAIMS_INVALID`) |
+| TV-004 | `ial="1"` with `cnf` claim missing | REJECT (`BADGE_CLAIMS_INVALID`) |
+| TV-005 | `cnf.kid` references non-existent verification method | REJECT (`BADGE_CLAIMS_INVALID`) |
+| TV-006 | `cnf.kid` key bytes ≠ `key` claim bytes (after normalization) | REJECT (`BADGE_CLAIMS_INVALID`) |
+| TV-007 | Badge `jti` appears on revocation list | REJECT (`BADGE_REVOKED`) |
+| TV-008 | Agent `sub` status is `disabled` | REJECT (`BADGE_AGENT_DISABLED`) |
+| TV-009 | `exp` < current_time (no clock skew tolerance remaining) | REJECT (`BADGE_EXPIRED`) |
+| TV-010 | `iss` not in verifier's trusted issuer list | REJECT (`BADGE_ISSUER_UNTRUSTED`) |
+| TV-011 | Signature does not verify against `{iss}` CA key | REJECT (`BADGE_SIGNATURE_INVALID`) |
+| TV-012 | Valid badge with all required claims correct (level `"0"`) | ACCEPT |
+| TV-013 | Valid badge at trust level `"1"` (if supported) | ACCEPT |
+| TV-014 | Valid badge at trust level `"2"` (if supported) | ACCEPT |
+| TV-015 | Valid badge at trust level `"3"` (if supported) | ACCEPT |
+| TV-016 | Valid badge at trust level `"4"` (if supported) | ACCEPT |
+
+### 16.3 Local Status Mocking
+
+For CI and local development, implementations MAY replace live network calls (issuer JWKS fetch, revocation/status fetches) with deterministic fixtures. When doing so, the verifier MUST preserve the same decision behavior (e.g., signature validation, staleness handling, and fail-closed defaults) as in production-connected deployments.
+
+---
+
+## 17. Deployment Profiles
+
+This section defines deployment profiles for operators to describe connectivity assumptions.
+
+**Normative-on-claim:** Implementations MAY claim support for one or more profiles. If an implementation claims a profile, it MUST implement all normative requirements listed for that profile.
+
+### 17.1 Profiles
+
+| Profile | Intended Use | Connectivity Assumption |
+|---------|--------------|-------------------------|
+| `dev` | Local development and tests | No external network required |
+| `connected-prod` | Typical internet-connected production | Outbound HTTPS allowed to issuer and registry endpoints |
+| `air-gapped` | Restricted or offline production | No runtime network access; offline bundles required |
+
+### 17.2 Profile Requirements
+
+| Requirement | `dev` | `connected-prod` | `air-gapped` |
+|------------|-------|------------------|--------------|
+| Trust levels | SHOULD support level `"0"` | SHOULD support levels `"1"`–`"4"` as applicable | SHOULD support levels `"1"`–`"4"` as applicable |
+| Reserved domain rejection | MAY accept `.invalid` issuers for testing | MUST reject issuers with `.invalid` TLD (RFC 2606) | MUST reject issuers with `.invalid` TLD (RFC 2606) |
+| Issuer keys (JWKS) | MAY be fixture-based | MUST be obtainable per §8 verification rules | MUST be provisioned out-of-band (pinned bundle) |
+| Revocation/status | MAY be fixture-based | MUST be checked per §7.5 | MUST be provisioned out-of-band (revocation/status snapshot) |
+| Staleness handling | MUST match production behavior | MUST fail closed by default when stale | MUST fail closed by default when snapshot is stale |
 
 ---
 
@@ -2388,6 +2458,8 @@ curl https://api.example.com/v1/task \
 
 | Version | Date | Changes |
 |---------|-----------|---------|
+| 1.5 | 2026-01-XX | **Clarified:** DV order authentication is a deployment choice (§7.2.4); registries MAY require authentication. **Added:** Hosted Registry Policy note; Domain Ownership Policy (prevents simultaneous multi-account verification of same domain). |
+| 1.4 | 2026-01-02 | **Added:** Development and Testing (§16); Deployment Profiles (§17); test vectors TV-013/TV-014 for levels 1-2. **Clarified:** Exact-match requirement for DV domain anchoring (§7.2.6); `.invalid` TLD MUST be rejected in production profiles; test vector path stability guarantee. **Updated:** Test vector canonical location (now maintained in `capiscio-e2e-tests`). |
 | 1.3 | 2025-12-23 | **Added:** Persistent DV Accounts (§7.3, OPTIONAL); Conformance section (§14) with test vectors. **Fixed:** IAL-0 key source rules; PoP key resolution anchor; CA did:web SSRF (MUST); `kid` selection semantics; staleness fail-closed default; Phase 4 DID resolution; SSRF baseline unified. |
 | 1.2 | 2025-12-22 | **Added:** Anonymous DV issuance (§7.2.3–7.2.7); ACME-Lite protocol; grant-based minting; SSRF hardening; error codes (§12.6–12.7). **Fixed:** Trust level as string; `aud` as array; `iss` HTTPS for levels 1–4; clock skew; replay retention; IAL semantics. |
 | 1.1 | 2025-12-12 | **Added:** Challenge endpoint (§12.1.1). **Fixed:** IAL-1 key binding MUST match; level 0 MUST be IAL-0; `htu` encoding; path conventions. |
