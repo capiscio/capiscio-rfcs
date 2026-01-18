@@ -4,13 +4,16 @@ This repository contains the technical specifications and architectural decision
 
 ## Active RFCs
 
-| RFC | Title | Status | Version |
-|-----|-------|--------|---------|
-| [RFC-001](docs/001-agcp.md) | Agent Governance Control Plane (AGCP) | ✅ Approved | - |
-| [RFC-002](docs/002-trust-badge.md) | Trust Badge Specification | ✅ Approved | v1.4 |
-| [RFC-003](docs/003-key-ownership-proof.md) | Key Ownership Proof Protocol | ✅ Approved | - |
-| [RFC-004](docs/004-tchb-transaction-hop-binding.md) | Transaction and Hop Binding (TCHB) | 📝 Draft | v0.3 |
-| [RFC-005](docs/005-policy-definition-distribution-enforcement.md) | Policy Definition, Distribution, and Enforcement (PDEP) | 📝 Draft | v0.2 |
+| RFC | Title | Status | Version | Implementation |
+|-----|-------|--------|---------|----------------|
+| [RFC-001](docs/001-agcp.md) | Agent Governance Control Plane (AGCP) | ✅ Approved | - | ✅ Implemented |
+| [RFC-002](docs/002-trust-badge.md) | Trust Badge Specification | ✅ Approved | v1.4 | ✅ Implemented |
+| [RFC-003](docs/003-key-ownership-proof.md) | Key Ownership Proof Protocol | ✅ Approved | - | ✅ Implemented |
+| [RFC-004](docs/004-tchb-transaction-hop-binding.md) | Transaction and Hop Binding (TCHB) | 📝 Draft | v0.3 | ⏳ Not Implemented |
+| [RFC-005](docs/005-policy-definition-distribution-enforcement.md) | Policy Definition, Distribution, and Enforcement (PDEP) | 📝 Draft | v0.2 | ⏳ Not Implemented |
+
+> **⚠️ Note:** Draft RFCs (RFC-004, RFC-005) are design documents that have not yet been implemented.
+> Do not expect CLI, SDK, or Server support for draft specifications.
 
 ## RFC Process
 
