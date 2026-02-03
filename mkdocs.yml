@@ -10,4 +10,6 @@ nav:
   - RFC-003 Key Ownership Proof: 003-key-ownership-proof.md
   - RFC-004 Transaction Hop Binding: 004-tchb-transaction-hop-binding.md
   - RFC-005 Policy Framework: 005-policy-definition-distribution-enforcement.md
+  - RFC-006 MCP Tool Authority: 006-mcp-tool-authority-evidence.md
+  - RFC-007 MCP Server Identity: 007-mcp-server-identity-discovery.md
   - Contributing: CONTRIBUTING.md
