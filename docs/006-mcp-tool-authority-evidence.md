@@ -1,12 +1,11 @@
 # RFC-006: MCP Tool Authority and Evidence
 
-**Version:** 0.3
+**Version:** 0.4
 **Status:** Draft
 **Authors:** CapiscIO Core Team
 **Created:** 2026-01-14
-**Updated:** 2026-01-14
-**Requires:** RFC-002 (Trust Badge Specification)
-**Related:** RFC-005 (PDEP)
+**Updated:** 2026-02-25
+**Requires:** RFC-002 (Trust Badge Specification), RFC-004 (Transaction and Hop Binding), RFC-005 (PDP Integration Profile), RFC-008 (Delegated Authority Envelopes)
 
 ---
 
@@ -16,8 +15,7 @@ This RFC defines how CapiscIO cryptographic identity and authority primitives ar
 
 It specifies a deterministic mechanism by which:
 
-* an agent’s identity is verified at runtime,
-* authorization is enforced prior to tool execution, and
+* an agent’s identity is verified at runtime,* scoped authority is verified when an Authority Envelope (RFC-008) is present,* authorization is enforced prior to tool execution, and
 * a tamper-evident evidence record is emitted for every invocation attempt.
 
 This specification is **language-, framework-, and platform-agnostic**. It is explicitly scoped to **single-hop tool execution within a single organization** and does not define federation, discovery, or multi-agent delegation semantics.
@@ -51,6 +49,7 @@ The goals of this RFC are:
 * Single MCP server enforcing authority over tool execution.
 * Single agent invoking a tool in a single organizational trust domain.
 * Identity verification using CapiscIO Trust Badges transmitted per request.
+* Authority verification using Authority Envelopes (RFC-008) when present.
 * Policy-based allow/deny decisions at tool invocation time.
 * Mandatory emission of structured evidence logs.
 
@@ -80,8 +79,14 @@ The goals of this RFC are:
 * **Policy Decision Point (PDP)**
   The component responsible for evaluating whether a tool invocation is authorized.
 
+* **Authority Envelope**
+  A JWS-signed delegation artifact conveying scoped authority from an issuer to a subject, as defined in RFC-008.
+
 * **Evidence Log**
   A structured, immutable record describing the identity, decision, and context of a tool invocation.
+
+* **Enforcement Mode**
+  One of EM-OBSERVE, EM-GUARD, EM-DELEGATE, EM-STRICT as defined in RFC-008 §10. Governs how the MCP server handles verification outcomes and PDP decisions.
 
 ---
 
@@ -91,33 +96,36 @@ This RFC supports **progressive assurance**.
 
 ### 5.1 CapiscIO-Enabled Callers
 
-Agents MAY present a CapiscIO Trust Badge via request headers.
-When present, the MCP server MUST treat the caller as a **verified agent principal**.
+Agents MAY present a CapiscIO Trust Badge via request headers. When present, the MCP server MUST treat the caller as a **verified agent principal**.
+
+Agents MAY additionally present an Authority Envelope (RFC-008). When both a valid Badge and a valid Envelope are present, the MCP server MUST treat the caller as a **verified and authority-scoped principal**, providing the highest assurance tier.
 
 ### 5.2 Non-CapiscIO Callers
 
 If no Trust Badge is present, the MCP server MAY accept the request under a reduced-assurance model (for example, API key or anonymous access), subject to restrictive policy.
 
-### 5.3 Assurance Recording
+### 5.3 Assurance Tiers
 
-Every evidence log MUST record the authentication assurance level used, for example:
+Every evidence log MUST record the authentication and authority assurance level used:
 
-* `badge`
-* `apikey`
-* `anonymous`
+| Level | Identity | Authority | Description |
+|-------|----------|-----------|-------------|
+| `badge+envelope` | Badge verified | Envelope verified | Full CapiscIO assurance. |
+| `badge` | Badge verified | No envelope | Identity-only. Authorization relies on PDP without envelope context. |
+| `apikey` | API key | None | Reduced assurance. |
+| `anonymous` | None | None | Minimum assurance. |
 
 ---
 
 ## 6. Runtime Behavior
 
-### 6.1 Identity Transmission
+### 6.1 Identity and Authority Transmission
 
-For HTTP-based transports, Trust Badges MUST be transmitted via headers.
-The `Authorization: Bearer <token>` header is RECOMMENDED.
+For HTTP-based transports, Trust Badges MUST be transmitted via headers. The `Authorization: Bearer <token>` header is RECOMMENDED. Authority Envelopes, when present, MUST be transmitted via `X-Capiscio-Authority` (see RFC-008 Appendix A).
 
 If no identity material is provided, the request MUST be evaluated under reduced assurance.
 
-> **Non-HTTP Transports (Non-Normative):** MCP implementations using stdio, websocket, or other non-HTTP transports MAY convey CapiscIO identity and context via protocol-specific metadata mechanisms. This RFC does not prescribe a canonical binding; implementations SHOULD document their chosen mechanism.
+> **Non-HTTP Transports (Non-Normative):** MCP implementations using stdio, websocket, or other non-HTTP transports MAY convey CapiscIO identity, authority, and hop context via protocol-specific metadata mechanisms (see RFC-008 Appendix B for `_meta.capiscio` conventions). This RFC does not prescribe a canonical binding; implementations SHOULD document their chosen mechanism.
 
 ---
 
@@ -137,6 +145,23 @@ After verification, implementations SHOULD discard the raw badge and retain only
 * agent identifier (`sub`)
 * badge identifier (`jti`)
 
+### 6.2.1 Authority Envelope Verification
+
+When an Authority Envelope is present alongside a Trust Badge, the MCP server MUST additionally:
+
+1. Verify the Envelope JWS signature per RFC-008 §9.2.
+2. Verify `expires_at` is in the future and `issued_at` is not in the future.
+3. Verify `issuer_badge_jti` or `subject_badge_jti` binds to the presented Badge's `jti`.
+4. Verify `capability_class` is relevant to the requested tool (prefix match per RFC-008 §7.2).
+5. If `parent_authority_hash` is non-null, verify delegation chain integrity per RFC-008 §6.
+
+If envelope verification fails, behavior depends on the active Enforcement Mode (RFC-008 §10):
+
+* **EM-OBSERVE / EM-GUARD:** Log the failure. The invocation MAY proceed under badge-only assurance.
+* **EM-DELEGATE / EM-STRICT:** DENY the invocation.
+
+When no Envelope is present, the MCP server MUST proceed under badge-only assurance. Badge-only mode remains fully valid — Authority Envelopes provide additional context, not a replacement for badge-based authorization.
+
 ---
 
 ### 6.3 Policy Authorization
@@ -147,6 +172,8 @@ Before executing a tool, the MCP server MUST perform a deterministic authorizati
 * Invocation metadata (tool name, action)
 * Applicable policy rules
 
+When an Authority Envelope is present, the PDP input MUST include envelope-sourced attributes per RFC-005 §5 (capability class, constraints, parent constraints, envelope ID, delegation depth, enforcement mode). When no Envelope is present, envelope-sourced fields MUST be `null`.
+
 The policy evaluation MUST produce one of two outcomes:
 
 * `ALLOW`
@@ -154,7 +181,7 @@ The policy evaluation MUST produce one of two outcomes:
 
 If the decision is `DENY`, the tool MUST NOT be executed.
 
-> **Implementation Note:** Implementations SHOULD use RFC-005 PDEP when policy complexity exceeds static tool ACLs. For simple deployments, local policy evaluation is sufficient.
+> **Implementation Note:** Implementations SHOULD use RFC-005 PIP when policy complexity exceeds static tool ACLs. For simple deployments, local policy evaluation is sufficient.
 
 ---
 
@@ -183,17 +210,22 @@ Logs MUST be structured JSON and MUST conform to the schema defined below.
 | `event.name`              | MUST be `capiscio.tool_invocation` |
 | `capiscio.agent.did`      | Agent DID or equivalent principal  |
 | `capiscio.badge.jti`      | Badge identifier, if present       |
-| `capiscio.auth.level`     | `badge`, `apikey`, or `anonymous`  |
+| `capiscio.auth.level`     | `badge+envelope`, `badge`, `apikey`, or `anonymous` |
 | `capiscio.target`         | Tool identifier                    |
 | `capiscio.policy_version` | Policy version used                |
+| `capiscio.policy.decision_id` | Decision ID from PDP (RFC-005 §6). REQUIRED when PDP is used. |
 | `capiscio.decision`       | `ALLOW` or `DENY`                  |
 
 ### 7.2.1 Optional Fields
 
 | Field                       | Description                                              |
 | --------------------------- | -------------------------------------------------------- |
-| `capiscio.tool.params_hash` | SHA-256 hash of canonicalized tool parameters (optional) |
-| `capiscio.deny_reason`      | Error code when decision is `DENY` (optional)            |
+| `capiscio.envelope_id`      | Authority Envelope ID, if present (RFC-008)              |
+| `capiscio.authority.envelope_hash` | SHA-256 hash of governing Envelope JWS (RFC-004 §8.7) |
+| `capiscio.authority.chain_depth` | Delegation chain depth (integer)                     |
+| `capiscio.txn_id`           | Transaction ID (RFC-004), if present                     |
+| `capiscio.tool.params_hash` | SHA-256 hash of canonicalized tool parameters            |
+| `capiscio.deny_reason`      | Error code when decision is `DENY`                       |
 
 **Parameter Hashing (Non-Normative):**
 
@@ -212,7 +244,7 @@ This enables forensic comparison without logging sensitive parameter values.
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "capiscio:rfc-006:tool-invocation:v0.3",
+  "$id": "capiscio:rfc-006:tool-invocation:v0.4",
   "type": "object",
   "required": [
     "event.name",
@@ -228,14 +260,19 @@ This enables forensic comparison without logging sensitive parameter values.
     "capiscio.badge.jti": { "type": "string" },
     "capiscio.auth.level": {
       "type": "string",
-      "enum": ["badge", "apikey", "anonymous"]
+      "enum": ["badge+envelope", "badge", "apikey", "anonymous"]
     },
     "capiscio.target": { "type": "string" },
     "capiscio.policy_version": { "type": "string" },
+    "capiscio.policy.decision_id": { "type": "string" },
     "capiscio.decision": {
       "type": "string",
       "enum": ["ALLOW", "DENY"]
     },
+    "capiscio.envelope_id": { "type": "string" },
+    "capiscio.authority.envelope_hash": { "type": "string" },
+    "capiscio.authority.chain_depth": { "type": "integer", "minimum": 0 },
+    "capiscio.txn_id": { "type": "string" },
     "capiscio.tool.params_hash": { "type": "string" },
     "capiscio.deny_reason": { "type": "string" }
   },
@@ -280,10 +317,12 @@ Vendor-specific telemetry integrations (e.g., Datadog, Grafana, Sentry) are expl
 ## 9. Security Considerations
 
 * Systems MUST fail closed on verification or policy errors.
-* Trust Badges MUST be transmitted over encrypted channels.
+* Trust Badges and Authority Envelopes MUST be transmitted over encrypted channels.
 * Badge lifetimes SHOULD be short to reduce replay risk.
 * Policy versions MUST be immutable and auditable.
 * Enforcement points MUST be non-bypassable.
+* **Envelope-aware authorization.** When an Authority Envelope is present, the MCP server MUST include envelope attributes in the PDP query (RFC-005 §5). Ignoring a present Envelope and authorizing on badge-only attributes weakens the delegation model.
+* **Replay prevention.** Authority Envelopes are multi-use within their TTL (RFC-008 §12). Per-invocation replay prevention MUST be implemented at the invocation layer — either via RFC-004 hop attestation or an implementation-specific nonce mechanism.
 
 ---
 
@@ -298,6 +337,9 @@ When a tool invocation is denied, implementations SHOULD use standardized error 
 | `TOOL_AUTH_MISSING`   | No identity material provided                  |
 | `TOOL_ISSUER_UNTRUSTED` | Badge issuer not in trusted allowlist        |
 | `TOOL_POLICY_DENIED`  | Policy evaluation returned DENY                |
+| `TOOL_ENVELOPE_INVALID` | Authority Envelope verification failed (signature, chain) |
+| `TOOL_ENVELOPE_EXPIRED` | Authority Envelope has expired                 |
+| `TOOL_ENVELOPE_SCOPE`   | Envelope `capability_class` does not cover the requested tool |
 | `TOOL_NOT_FOUND`      | Requested tool does not exist                  |
 
 These codes align with RFC-002 error conventions.
@@ -324,6 +366,9 @@ to allow future evolution without breaking compliance.
 ---
 
 ## 12. Changelog
+
+* **v0.4**
+  Authority Envelope awareness (RFC-008): envelope verification algorithm (§6.2.1), `badge+envelope` assurance tier (§5.3), envelope-sourced evidence log fields and error codes, RFC-005 PDEP→PIP reference update.
 
 * **v0.3**
   Added `capiscio.tool.params_hash` for forensic comparison without logging sensitive params.

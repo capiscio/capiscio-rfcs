@@ -1,10 +1,10 @@
 # RFC-004: CapiscIO Transaction and Hop Binding Protocol (TCHB)
 
-**Version:** 0.3
+**Version:** 0.4
 **Status:** Draft
 **Authors:** CapiscIO Core Team
 **Created:** 2025-12-24
-**Updated:** 2026-01-02
+**Updated:** 2026-02-25
 **Requires:** RFC-002 (Trust Badge Specification)
 
 ---
@@ -23,6 +23,15 @@ The protocol introduces:
   3. the specific **Trust Badge session** used to authenticate (`badge_jti`).
 
 This yields a self-verifying “tracking number” for agent workflows without requiring a global ledger.
+
+---
+
+## 1.1 Relationship to Other RFCs
+
+| CapiscIO RFC | Relationship |
+|---|---|
+| RFC-002 (Trust Badge) | Hop Attestations bind to badge sessions via `badge_jti`. The signing key is the badge-bound agent key. |
+| RFC-008 (Delegated Authority Envelopes) | Hop Attestations MAY bind to a governing Authority Envelope via `authority_envelope_hash`, linking transport provenance to delegated authority. |
 
 ---
 
@@ -205,6 +214,7 @@ Example payload:
   "txn_id": "018f4e1d-7e5d-7a9f-a9d2-8b6a0f2c9b11",
   "hop_id": "550e8400-e29b-41d4-a716-446655440000",
   "parent_hop_hash": "sha256:LCa0a2j_xo_5m0U8HTBBNBNCLXBkg7-g-YpeiGJm564",
+  "authority_envelope_hash": "sha256:Xk9a7Rm_3pN2vQ8wY1tFGH5jK6bC0dE4fS7uI9oL_Bc",
   "iss": "did:web:example.com:agents:my-agent",
   "target_aud": "https://api.partner.com",
   "badge_jti": "b8f2c6a5-2d6f-4e44-9f55-2a1d6d9e0f12",
@@ -229,6 +239,7 @@ Claims:
 | `exp`             | REQUIRED    | Expiration (Unix seconds).                                               |
 | `htm`             | REQUIRED    | HTTP method (or equivalent) bound to the hop.                            |
 | `htu`             | REQUIRED    | Target URI (or canonical target identifier) bound to the hop.            |
+| `authority_envelope_hash` | OPTIONAL | SHA-256 hash of the governing Authority Envelope JWS (see §8.7). RECOMMENDED for side-effecting operations. |
 | `body_hash`       | RESERVED    | Not used in v0.2. MUST be ignored if present.                            |
 
 #### 8.3.1 `badge_jti` Binding (Normative)
@@ -258,6 +269,24 @@ When hashing a hop attestation for `parent_hop_hash`, implementations MUST:
 4. SHA-256 hash.
 5. base64url encode without padding.
 6. Prefix with `sha256:`.
+
+### 8.7 Authority Envelope Binding (Normative)
+
+When `authority_envelope_hash` is included, it MUST be computed as the SHA-256 hash of the **JWS Compact Serialization** of the governing Authority Envelope (RFC-008). The hash uses the same encoding convention as `parent_hop_hash`:
+
+1. Take the full JWS Compact Serialization string (header.payload.signature).
+2. UTF-8 encode.
+3. SHA-256 hash.
+4. base64url encode without padding.
+5. Prefix with `sha256:`.
+
+**Cardinality:** `authority_envelope_hash` binds to a single Authority Envelope. If multiple Envelopes govern a workflow (e.g., independent delegation chains), the hop binds to the **leaf Envelope** that directly authorizes the action.
+
+**Requirement levels:**
+
+* OPTIONAL for read-only operations.
+* RECOMMENDED for side-effecting operations (writes, mutations, tool executions).
+* When the deployment's Enforcement Mode (RFC-008 §10) is EM-STRICT, PEPs MUST require `authority_envelope_hash` for side-effecting operations. Hops lacking the binding for side-effecting operations MUST be denied in EM-STRICT.
 
 ---
 
@@ -292,7 +321,8 @@ Given a request containing `X-Capiscio-Txn`, `X-Capiscio-Hop`, and a Trust Badge
 
     * Verify `htm` matches the request method.
     * Verify `htu` matches the canonicalized target (see §9.3).
-11. If all checks pass, accept request and emit telemetry per §10.
+11. **Authority Envelope binding (if present).** If `authority_envelope_hash` is present and an Authority Envelope was supplied with the request, verify the hash matches `SHA-256(envelope JWS)` per §8.7. If present and mismatch, reject. If absent, this check is skipped (see §8.7 for requirement levels by Enforcement Mode).
+12. If all checks pass, accept request and emit telemetry per §10.
 
 ### 9.3 `htu` Canonicalization (Normative)
 
@@ -356,6 +386,7 @@ When a hop is emitted (client) or verified (server), implementations MUST be cap
 | `capiscio.agent.did`       | String         | Agent DID initiating the hop (from HA `iss`).                                     |
 | `capiscio.badge.jti`       | String         | The `jti` of the Trust Badge used for authentication.                             |
 | `capiscio.target_aud`      | String         | Intended audience of the hop (from HA `target_aud`).                              |
+| `capiscio.authority.envelope_hash` | String or null | Hash of the governing Authority Envelope, if bound (from HA `authority_envelope_hash`). |
 | `event.name`               | String         | RECOMMENDED: `capiscio.hop_verified` (server) or `capiscio.hop_emitted` (client). |
 
 Implementations SHOULD include additional operational fields when available (duration, status code, error code), but MUST NOT change the semantics of the required fields.
@@ -378,6 +409,7 @@ capiscio.hop_id: <hop_id>
 capiscio.parent_hash: <parent_hop_hash>
 capiscio.agent.did: <iss>
 capiscio.badge.jti: <badge_jti>
+capiscio.authority.envelope_hash: <authority_envelope_hash>  # if present
 ```
 
 **3. Context propagation:**
@@ -433,7 +465,6 @@ If an agent aggregates inputs from multiple upstream hops:
 ## 13. Future Work
 
 * Optional per-request signing separate from HA (to reduce reliance on bearer credentials).
-* Constrained delegation artifacts.
 * Standardized metric names derived from spans (example `capiscio.hop_latency`).
 * Sampling guidance for high-value transactions.
 * Optional `body_hash` as an experimental extension once streaming-safe patterns exist.
@@ -469,7 +500,8 @@ If an agent aggregates inputs from multiple upstream hops:
 
     "capiscio.agent.did": { "type": "string" },
     "capiscio.badge.jti": { "type": "string" },
-    "capiscio.target_aud": { "type": "string" }
+    "capiscio.target_aud": { "type": "string" },
+    "capiscio.authority.envelope_hash": { "type": ["string", "null"] }
   },
   "additionalProperties": true
 }
@@ -531,5 +563,6 @@ Content-Type: application/json
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.4 | 2026-02-25 | Authority Envelope binding: `authority_envelope_hash` claim (§8.7), verification step (§9.2), telemetry field (§10.1), RFC relationship table (§1.1). |
 | 0.3 | 2026-01-02 | **Added:** `iss == badge.sub` semantic binding (§9.2 step 7); MCP `htu` canonicalization (§6.3); explicit percent-encoding algorithm. **Changed:** `aud` → `target_aud` to distinguish from RFC-002 Badge `aud`. **Fixed:** Query normalization rules (sorting, encoding, `%20` not `+`); parent hash audit obligation note; replay cache upgraded to SHOULD. |
 | 0.2 | 2025-12-24 | Initial draft. |
