@@ -1,54 +1,57 @@
-# RFC-005: Policy Definition, Distribution, and Enforcement (PDEP)
+# RFC-005: PDP Integration Profile (PIP)
 
-**Version:** 0.2  
-**Status:** Draft  
-**Authors:** CapiscIO Core Team  
-**Created:** 2025-12-24  
-**Updated:** 2026-01-02  
-**Requires:** RFC-001 (AGCP), RFC-002 (Trust Badges), RFC-004 (Transaction and Hop Attestations)
+**Version:** 1.0
+**Status:** Draft
+**Authors:** CapiscIO Core Team
+**Created:** 2025-12-24
+**Updated:** 2026-02-25
+**Requires:** RFC-002 (Trust Badge Specification), RFC-004 (Transaction and Hop Binding), RFC-008 (Delegated Authority Envelopes)
+**Supersedes:** RFC-005 v0.2 (PDEP)
 
 ---
 
 ## 1. Abstract
 
-This RFC defines the CapiscIO **Policy Definition, Distribution, and Enforcement Plane (PDEP)**. PDEP standardizes:
+This RFC defines the **PDP Integration Profile (PIP)**, the canonical interface contract between CapiscIO Policy Enforcement Points (PEPs) and external Policy Decision Points (PDPs).
 
-1. A policy **decision contract** between Policy Enforcement Points (PEPs) and Policy Decision Points (PDPs).
-2. A signed **policy bundle** format and distribution mechanism.
-3. A first-class **obligations** model to express conditional controls (for example rate limiting, redaction, and escalation) as part of an allow decision.
-4. Canonical **telemetry** that links runtime traces to the exact policy decision and policy version.
+PIP standardizes:
 
-PDEP is engine-agnostic: the decision logic may be implemented in OPA, Cedar, or other policy engines. CapiscIO standardizes the inputs, outputs, distribution, and observability, not the policy language itself.
+1. The **decision request schema** — the attributes PEPs MUST provide to PDPs, including Authority Envelope context from RFC-008.
+2. The **decision response schema** — the structure PDPs MUST return.
+3. **Obligation semantics** — enforceable contracts attached to allow decisions, with handling rules per Enforcement Mode.
+4. **Constraint narrowing responsibility** — the PDP's role as the authority escalation guardrail for delegated envelopes.
+
+PIP is engine-agnostic. The decision logic may reside in OPA, Cedar, cloud IAM, or any other policy engine. CapiscIO standardizes the wire contract, not the policy language.
+
+**What PIP is not:** PIP does not define policy authoring, policy bundling, policy distribution, policy lifecycle, conflict resolution, or PDP execution semantics. Those are deployment concerns outside the CapiscIO protocol boundary.
 
 ---
 
 ## 2. Relationship to Other RFCs
 
-| Capability | RFC | How it is used here |
-|---|---|---|
-| Trust Badges (agent identity) | RFC-002 | PEP authenticates subjects and includes `subject.did`, `subject.badge_jti`, and `subject.ial` in the decision input. |
-| Transaction and hop chain of custody | RFC-004 | PEP propagates `txn_id` and may include current hop metadata in the decision input and telemetry. |
-| Trust graph and invariant preservation | RFC-001 | PDEP is authorization. It must not weaken the invariant that identity does not imply authority. |
+| CapiscIO RFC | Relationship |
+|---|---|
+| RFC-002 (Trust Badge) | PEP extracts `subject.did`, `subject.badge_jti`, `subject.trust_level`, and `subject.ial` from the Badge for the decision request. |
+| RFC-004 (TCHB) | PEP includes `context.txn_id` and `context.hop_id` for transaction correlation. |
+| RFC-008 (DAE) | PEP extracts envelope attributes (`capability_class`, `constraints`, `parent_constraints`, `envelope_id`, `delegation_depth`, `enforcement_mode`) for the decision request. RFC-008 §9.2 step 9 and §11 delegate the PDP wire contract to this specification. |
 
 **Invariant Preservation:**
 
-A valid Trust Badge is necessary for authentication but is not sufficient for authorization. PEPs must call a PDP or apply a signed local policy bundle. Services must not implement authorization as ad hoc checks on badge claims.
+A valid Trust Badge is necessary for authentication but is not sufficient for authorization. A valid Authority Envelope establishes scoped authority but the PDP makes the final authorization decision. PEPs MUST NOT implement authorization as ad hoc checks on badge claims or envelope fields.
 
 ---
 
 ## 3. Terminology
 
-The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" are to be interpreted as described in RFC 2119.
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
 
 | Term | Definition |
 |---|---|
-| **PAP** | Policy Administration Point. Authoring and publishing policies. |
-| **PDP** | Policy Decision Point. Evaluates a request and returns a decision. |
-| **PEP** | Policy Enforcement Point. Intercepts a request, queries PDP or evaluates local bundle, and enforces the decision and obligations. |
-| **Bundle** | A signed collection of policy artifacts and metadata distributed to PEPs. |
-| **Decision** | The PDP result: allow or deny, plus obligations and decision metadata. |
-| **Obligation** | A conditional contract attached to an allow decision that the PEP must enforce. |
-| **Decision ID** | A stable identifier for a single decision evaluation. Used for audit and telemetry correlation. |
+| **PDP** | Policy Decision Point. An external engine that evaluates an authorization request and returns a decision. CapiscIO does not implement a PDP. |
+| **PEP** | Policy Enforcement Point. Intercepts requests, constructs PDP queries from Badge and Envelope data, and enforces the resulting decision and obligations. |
+| **Decision** | The PDP result: ALLOW or DENY, plus obligations and metadata. |
+| **Obligation** | A conditional contract attached to an ALLOW decision that the PEP must attempt to enforce. |
+| **Enforcement Mode** | One of EM-OBSERVE, EM-GUARD, EM-DELEGATE, EM-STRICT as defined in RFC-008 §10. Governs how PEP handles PDP decisions and obligations. |
 
 ---
 
@@ -56,577 +59,349 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 ### 4.1 Goals
 
-- Define a stable, engine-agnostic policy **input and output contract**.
-- Define signed **policy bundles** for distribution and offline enforcement.
-- Standardize **obligations** so allow decisions can be constrained.
-- Define canonical **telemetry** linking runtime traces to policy versions and decisions.
-- Support both **online** PDP calls and **offline** local evaluation.
+* Define the canonical **decision request attribute schema** for PDP queries.
+* Define the canonical **decision response schema** including obligations.
+* Define **obligation semantics** per Enforcement Mode.
+* Define **constraint narrowing** as a first-class PDP responsibility.
+* Define a minimal **break-glass override** contract for operational safety.
 
 ### 4.2 Non-Goals
 
-- Defining a new policy language.
-- Replacing OpenTelemetry or vendor APM systems.
-- Providing non-repudiation of full request bodies (payload hashing is out of scope for v0.1).
-- Defining governance workflows for policy review and approvals (organizational process is out of scope).
+* Policy language, policy evaluation semantics, or policy conflict resolution.
+* Policy bundle format, signing, distribution, or caching.
+* Policy administration, authoring, or lifecycle management.
+* PDP availability strategies or failover architectures.
+* Replacing OpenTelemetry or vendor-specific telemetry integrations.
 
 ---
 
-## 5. Architecture Overview
+## 5. Decision Request Schema (Normative)
 
-### 5.1 Components
+### 5.1 Attribute Groups
 
-```
-Request
-  │
-  ▼
-PEP (Gateway, Sidecar, Agent Runtime)
-  │   ├─ (Online) Query PDP over HTTPS
-  │   └─ (Offline) Evaluate local signed bundle
-  ▼
-Enforce decision + obligations
-  │
-  ▼
-Downstream service
-```
+Every decision request MUST include `pip_version` with value `"capiscio.pip.v1"` for this specification version. PEPs MUST reject responses from PDPs that do not recognize the version.
 
-### 5.2 Enforcement Modes
+The PEP MUST construct a decision request containing the following attribute groups. Attributes sourced from Authority Envelopes (RFC-008) are REQUIRED when an Envelope is present. When no Envelope is present (badge-only mode), envelope-sourced fields MUST be `null`.
 
-| Mode | Where decisions come from | Use case |
-|---|---|---|
-| Online | PDP API | High assurance, rapid policy changes |
-| Offline | Signed bundle cached at PEP | Edge, air-gapped, latency-sensitive |
-| Hybrid | Bundle default + PDP override | Gradual rollout and resilience |
+| Attribute | Source | Requirement | Description |
+|-----------|--------|-------------|-------------|
+| `subject.did` | Badge `sub` or Envelope `subject_did` | REQUIRED | DID of the acting agent. |
+| `subject.badge_jti` | Badge `jti` | REQUIRED | Active badge session identifier. |
+| `subject.ial` | Badge `ial` | REQUIRED | Identity Assurance Level. |
+| `subject.trust_level` | Badge `vc.credentialSubject.level` | REQUIRED | Trust Level (RFC-002). |
+| `action.capability_class` | Envelope `capability_class` | REQUIRED if Envelope present | Dot-notation capability namespace (RFC-008 §7). |
+| `action.operation` | Request context | REQUIRED | Specific operation (e.g., tool name, HTTP method + route). |
+| `resource.identifier` | Request context | REQUIRED | Target resource identifier. |
+| `context.txn_id` | Envelope `txn_id` or RFC-004 header | REQUIRED | Transaction correlation ID. |
+| `context.hop_id` | RFC-004 hop attestation | OPTIONAL | Current hop identifier. |
+| `context.envelope_id` | Envelope `envelope_id` | REQUIRED if Envelope present | Audit correlation for the governing Envelope. |
+| `context.delegation_depth` | Computed from chain | REQUIRED if Envelope present | Current depth in the delegation chain. |
+| `context.constraints` | Envelope `constraints` | REQUIRED if Envelope present | Constraint object for this Envelope. |
+| `context.parent_constraints` | Parent Envelope `constraints` | REQUIRED if derived Envelope | Parent constraints for narrowing validation. `null` for root Envelopes. |
+| `context.enforcement_mode` | PEP configuration | REQUIRED | Active Enforcement Mode (RFC-008 §10). |
+| `environment.workspace` | PEP configuration | OPTIONAL | Workspace or tenant identifier. |
+| `environment.pep_id` | PEP configuration | OPTIONAL | PEP instance identifier. |
+| `environment.time` | PEP clock | RECOMMENDED | Request evaluation time (ISO 8601). |
 
----
-
-## 6. Policy Bundle Format and Signing
-
-### 6.1 Bundle Requirements (Normative)
-
-- Bundles MUST be signed by an issuer key that PEPs trust.
-- PEPs MUST verify the signature before accepting a bundle.
-- Bundles MUST be immutable once published. New policy is a new bundle.
-- Bundles SHOULD be small enough for frequent distribution (target under 5 MB).
-
-### 6.2 Bundle Metadata Example (Normative)
+### 5.2 Example Request
 
 ```json
 {
-  "bundle_id": "polb_01JFP8F4WQ1JQK8H0YV6QJ4K2M",
-  "version": "1.2.0",
-  "issued_at": "2025-12-24T00:00:00Z",
-  "issuer": "https://registry.capisc.io",
-  "audience": ["urn:capiscio:workspace:acme-prod"],
-  "scope": {
-    "env": ["prod"],
-    "peps": ["gateway", "sidecar", "agent-runtime"]
-  },
-  "policies": [
-    {
-      "policy_id": "pol_approve_external_agents",
-      "language": "capiscio.rego.v1",
-      "entrypoints": ["allow"],
-      "content": "base64url(<bytes>)",
-      "content_type": "text/plain",
-      "sha256": "base64url(<sha256-bytes>)"
-    }
-  ],
-  "digest": {
-    "alg": "sha256",
-    "value": "base64url(<sha256-of-canonical-metadata>)"
-  }
-}
-```
-
-### 6.3 Bundle Packaging
-
-Implementations MAY package bundles as:
-- A single JSON with embedded policy content (small bundles), or
-- A signed manifest plus separate content blobs (larger bundles).
-
-If separate blobs are used, each blob MUST be referenced by digest and verified before use.
-
-#### 6.3.1 Bundle Digest (OPTIONAL)
-
-The `digest` field is OPTIONAL. It provides a content-addressable identifier for the bundle metadata, independent of the JWS signature. This is useful for:
-- Content-addressed storage systems
-- Bundle deduplication across PEPs
-- Audit trails that reference bundles by content hash
-
-**Canonicalization (Normative):**
-
-If `digest` is included, it MUST be computed as follows:
-
-1. Start with the bundle metadata JSON.
-2. Remove the `digest` field entirely (to avoid self-reference).
-3. Canonicalize using RFC 8785 (JCS): keys sorted lexicographically, strings escaped per RFC 8259.
-4. UTF-8 encode.
-5. SHA-256 hash.
-6. base64url encode without padding.
-
-The JWS signature already provides integrity; `digest` is for content-addressing only. PEPs MUST NOT use `digest` as a substitute for signature verification.
-
-### 6.4 Bundle Signing Format (Normative)
-
-Bundles MUST be signed as a JWS (compact serialization) wrapping the bundle metadata JSON.
-
-**Header requirements:**
-
-```json
-{
-  "alg": "EdDSA",
-  "typ": "capiscio.policy-bundle+jwt",
-  "kid": "<key-id>"
-}
-```
-
-- `alg` MUST be `EdDSA` (Ed25519). Implementations MAY support `ES256` as a fallback.
-- `typ` MUST be `capiscio.policy-bundle+jwt`.
-- `kid` MUST be present and MUST reference a key in the PEP's configured trust store.
-
-**Key discovery:**
-
-PEPs MUST obtain bundle signing keys via one of:
-
-1. **Configured JWKS endpoint:** PEP fetches keys from a configured URL (e.g., `https://registry.capisc.io/.well-known/jwks.json`) with issuer allowlist validation.
-2. **Pinned key bundle:** For air-gapped deployments, keys are provisioned out-of-band as a static JWKS file.
-
-PEPs MUST reject bundles signed by unknown `kid` values. PEPs SHOULD cache JWKS with appropriate TTL and refresh logic.
-
-**SSRF Hardening (Normative):**
-
-When fetching JWKS from configured endpoints, PEPs MUST apply SSRF protections:
-- MUST validate that the URL scheme is `https` (not `http`, `file`, `ftp`, etc.).
-- For `connected-prod` deployments: MUST reject URLs resolving to private IP ranges (RFC 1918: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), loopback (`127.0.0.0/8`, `::1`), and link-local addresses (`169.254.0.0/16`, `fe80::/10`).
-- MUST enforce DNS resolution timeouts (RECOMMENDED: 5 seconds) and connection timeouts (RECOMMENDED: 10 seconds).
-- See RFC-002 §12.3 for baseline SSRF guidance applicable to all CapiscIO components.
-
-**Verification:**
-
-1. Parse JWS and extract header.
-2. Validate `typ == capiscio.policy-bundle+jwt`.
-3. Resolve `kid` to a trusted public key.
-4. Verify signature over the JWS signing input.
-5. Parse payload as bundle metadata JSON.
-6. Verify `bundle.issuer` matches a configured allowlist.
-7. Verify `bundle.audience` includes the PEP's configured audience.
-
----
-
-## 7. Distribution and Caching
-
-### 7.1 Bundle Fetch (Online)
-
-PEPs MAY fetch the latest bundle from a configured endpoint:
-
-- `GET /v1/policy/bundles/latest`
-
-PEPs MUST validate:
-- TLS, issuer identity, and signature
-- audience and scope compatibility
-- freshness policy (for example `max_bundle_age`)
-
-### 7.2 Caching Rules (Normative)
-
-- PEPs MUST cache the last known good bundle.
-- PEPs MUST NOT switch to an unverified bundle.
-- If fetching fails, PEPs SHOULD continue using the cached bundle until it expires by local policy.
-
-### 7.3 Bundle Expiry
-
-Bundles MAY include a recommended maximum age. If a bundle is older than `max_bundle_age`, the PEP SHOULD treat the deployment as degraded and follow the configured failure policy (see §10.4).
-
----
-
-## 8. Decision Contract
-
-### 8.1 Decision Input (Normative)
-
-The PEP sends a decision request containing:
-
-- **subject**: who is acting
-- **action**: what is being attempted
-- **resource**: what is being acted on
-- **transport**: request context (method, route, audience)
-- **context**: transaction and hop metadata
-- **environment**: workspace and runtime context
-
-#### 8.1.1 Input Schema (Illustrative)
-
-```json
-{
-  "decision_version": "capiscio.pdep.v0.1",
+  "pip_version": "capiscio.pip.v1",
   "subject": {
-    "did": "did:web:registry.capisc.io:agents:agent-123",
+    "did": "did:web:registry.capisc.io:agents:worker-1",
     "badge_jti": "550e8400-e29b-41d4-a716-446655440000",
     "ial": "1",
     "trust_level": "2"
   },
   "action": {
-    "name": "a2a.sendMessage"
+    "capability_class": "tools.database.read",
+    "operation": "database_query"
   },
   "resource": {
-    "type": "a2a.inbox",
-    "id": "urn:capiscio:inbox:partner-foo"
-  },
-  "transport": {
-    "protocol": "http",
-    "method": "POST",
-    "route": "POST /v1/a2a/sendMessage",
-    "target_aud": "https://api.partner.example.com",
-    "client_ip": "203.0.113.10"
+    "identifier": "urn:capiscio:tool:database-prod:query"
   },
   "context": {
-    "txn_id": "6f8c3d8e-2c1c-4b53-9a93-8cb0f7c8c4db",
-    "hop_id": "hop_01JFP8K7XW7X9S4W2A1R7QG3D9"
+    "txn_id": "018f4e1d-7e5d-7a9f-a9d2-8b6a0f2c9b11",
+    "hop_id": "hop_01JFP8K7XW7X9S4W2A1R7QG3D9",
+    "envelope_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "delegation_depth": 2,
+    "constraints": {
+      "tables": ["users"],
+      "operations": ["SELECT"]
+    },
+    "parent_constraints": {
+      "tables": ["users", "orders"],
+      "operations": ["SELECT", "INSERT"]
+    },
+    "enforcement_mode": "EM-DELEGATE"
   },
   "environment": {
     "workspace": "urn:capiscio:workspace:acme-prod",
     "pep_id": "pep_gateway_us_east_1",
-    "time": "2025-12-24T00:00:01Z"
+    "time": "2026-02-25T12:00:01Z"
   }
 }
 ```
 
-### 8.2 Route Canonicalization (Operational Reality)
+### 5.3 Route Canonicalization
 
-PEPs often see raw paths (for example `/v1/invoices/123`) and may not know the canonical template (`/v1/invoices/{id}`).
-
-- PEPs SHOULD canonicalize routes when possible using explicit configuration (for example OpenAPI specs or route tables).
-- If the PEP cannot canonicalize, it MUST pass the raw path in `transport.route`.
-- Policy authors MUST account for high-cardinality raw routes. Use prefix matching, wildcards, or regex in the underlying engine to avoid brittle policies.
+PEPs often see raw paths (e.g., `/v1/invoices/123`) rather than route templates (`/v1/invoices/{id}`). PEPs SHOULD canonicalize routes when possible via explicit configuration (e.g., OpenAPI specs). If canonicalization is not possible, the PEP MUST pass the raw path. Policy authors MUST account for high-cardinality raw routes using prefix matching or wildcards.
 
 ---
 
-## 9. Decision Response
+## 6. Decision Response Schema (Normative)
 
-### 9.1 Response Fields (Normative)
+### 6.1 Response Fields
 
-A decision response MUST include:
+| Field | Requirement | Type | Description |
+|-------|-------------|------|-------------|
+| `decision` | REQUIRED | String | `"ALLOW"` or `"DENY"`. |
+| `decision_id` | REQUIRED | String | Globally unique identifier for this evaluation. Used for audit correlation. |
+| `obligations` | REQUIRED | Array | Obligation objects (may be empty). |
+| `reason` | OPTIONAL | String | Human-readable explanation. |
+| `ttl` | OPTIONAL | Integer | Decision cache lifetime in seconds. See §6.3 for caching rules. |
 
-- `decision`: `"allow"` or `"deny"`
-- `decision_id`: unique ID for this evaluation
-- `policy`: metadata identifying the policy basis (bundle id, policy ids, version)
-- `obligations`: array of obligations (may be empty)
-- `reason`: optional human-readable reason
-- `ttl_seconds`: optional cache hint for local decision caching
+### 6.3 Decision Caching Rules
 
-#### 9.1.1 Response Example
+PEPs MAY cache ALLOW decisions when:
+
+* The subject identity is stable (`badge_jti` binding is present), and
+* Caching does not violate local security policy.
+
+PEPs MUST NOT cache a decision beyond the **earliest** of:
+
+* The `ttl` value from the PDP response.
+* The governing Envelope's `expires_at` (if an Envelope is present).
+* The Badge's expiration (`exp` claim).
+
+This prevents temporal authority extension — a cached ALLOW decision MUST NOT outlive the artifacts that justified it.
+
+PEPs MUST NOT cache DENY decisions unless explicitly configured.
+
+### 6.4 Example Response
 
 ```json
 {
-  "decision": "allow",
+  "decision": "ALLOW",
   "decision_id": "pdec_01JFP8M2E7D2QW8F0F3W9H4C1K",
-  "policy": {
-    "bundle_id": "polb_01JFP8F4WQ1JQK8H0YV6QJ4K2M",
-    "bundle_version": "1.2.0",
-    "policy_ids": ["pol_approve_external_agents"]
-  },
   "obligations": [
     {
-      "type": "rate_limit",
+      "type": "rate_limit.apply",
       "params": {
         "rpm": 10,
         "key": "rate_limit:{{subject.did}}"
       }
-    },
-    {
-      "type": "redact",
-      "params": {
-        "fields": ["/pii/email", "/pii/phone"]
-      }
     }
   ],
-  "reason": "DV agents may message partner inbox with rate limiting and redaction.",
-  "ttl_seconds": 30
+  "reason": "Agent authorized for database read with rate limiting.",
+  "ttl": 30
 }
 ```
 
 ---
 
-## 10. Obligations
+## 7. Obligation Semantics (Normative)
 
-### 10.1 Obligations Semantics (Normative)
+### 7.1 Obligation Envelope
 
-- Obligations are enforced by the PEP, not the PDP.
-- If `decision="allow"` and an obligation cannot be enforced, the PEP MUST follow its configured failure policy:
-  - fail-closed: deny
-  - fail-open: allow but emit degraded telemetry and alerts
-
-### 10.2 Standard Obligations (v0.1)
-
-This RFC standardizes a minimal set. PEPs MAY support more.
-
-#### rate_limit
-
-- `params.rpm` (integer): requests per minute
-- `params.key` (string): bucket key
-
-**Templating (Normative):**  
-PEPs SHOULD support variable substitution in `params.key` using the decision input fields. Example:
-
-- `"rate_limit:{{subject.did}}"` enforces per-agent limits.
-- `"rate_limit:{{context.txn_id}}"` enforces per-transaction limits.
-
-If templating is not supported, the PEP MUST treat `params.key` as a literal string and SHOULD emit a warning in telemetry.
-
-#### redact
-
-- `params.fields` (array of strings): JSON Pointers (RFC 6901) identifying fields to redact.
-- Examples: `"/pii/email"`, `"/pii/phone"`, `"/data/0/ssn"` (array index).
-- Redaction applies to request or response payloads only when the PEP has access to structured representations (for example JSON). If the PEP cannot parse the payload, it MUST apply a conservative behavior configured by the deployment (deny or pass-through and alert).
-- JSON Pointer is chosen over dotted paths to handle keys containing dots and array indices unambiguously.
-
-#### require_step_up
-
-- `params.mode` (string): `"human_review"` or `"manual_approval"`
-- PEP behavior is deployment-specific, but it MUST block the action until the step-up is satisfied.
-
-### 10.3 Obligations Ordering
-
-PEPs SHOULD enforce obligations in this order:
-1. rate_limit
-2. redact
-3. require_step_up
-
-If a deployment needs different ordering, it must be explicitly configured and documented.
-
-### 10.4 Failure Policy (Fail-Closed vs Fail-Open)
-
-Default is fail-closed.
-
-- If PDP is unreachable and no valid local bundle is available, PEP SHOULD deny.
-- If an obligation cannot be enforced, PEP SHOULD deny.
-
-**Operational Telemetry (Normative):**  
-When enforcement fails due to PDP unavailability or missing valid cached decisions, the PEP SHOULD emit a distinct alerting signal:
-
-- Metric (RECOMMENDED): `capiscio_pep_pdp_unreachable_count`
-- Span or log attributes (RECOMMENDED):
-  - `capiscio.policy.error_code = PDP_UNAVAILABLE`
-  - `capiscio.policy.degraded = true` (only if configured fail-open)
-
-### 10.5 Decision Caching
-
-PEPs MAY cache allow decisions for up to `ttl_seconds` when provided, but only when:
-- the subject identity is stable (badge_jti binding is present), and
-- caching does not violate local security policy.
-
-PEPs MUST NOT cache deny decisions unless explicitly configured.
-
-### 10.6 Decision ID Requirements
-
-- `decision_id` MUST be globally unique within the issuer scope.
-- PEP telemetry MUST include `capiscio.policy.decision_id` (see §11).
-
-### 10.7 Emergency Break-Glass Override
-
-Break-glass is a controlled mechanism to bypass normal policy to restore service during outages.
-
-#### 10.7.1 Override Token
-
-A break-glass override token is a signed JWS with:
-- issuer: a root administrative issuer configured in PEP trust
-- short TTL (RECOMMENDED: 5 minutes)
-- scope: defines what the override can bypass
-
-#### 10.7.2 Scope Wildcards (Normative)
-
-To ensure overrides are operationally usable during broad outages, scope fields MUST support wildcards.
-
-- `methods`: MAY include `"*"` to match any method.
-- `routes`: MAY include `"*"` to match any route, or prefix wildcards such as `"GET /v1/*"`.
-
-PEPs MUST apply deterministic matching:
-- exact match wins over wildcard
-- prefix wildcards match by string prefix
-- `"*"` matches all
-
-PEPs SHOULD require narrow scopes by default but MUST allow `"*"`.
-
-#### 10.7.3 Enforcement Rules
-
-- Override tokens MUST be validated before use.
-- Override MUST be visible in telemetry via:
-  - `capiscio.policy.override = true`
-  - `capiscio.policy.override_jti` (token id)
-- Override MUST NOT disable authentication. It only bypasses authorization checks.
-
-#### 10.7.4 Override Token Required Claims (Normative)
-
-To ensure interoperability, break-glass override tokens MUST include the following claims:
-
-| Claim | Requirement | Description |
-|-------|-------------|-------------|
-| `jti` | REQUIRED | Unique token identifier for audit correlation. |
-| `iat` | REQUIRED | Issued-at timestamp (Unix seconds). |
-| `exp` | REQUIRED | Expiration timestamp. SHOULD be short (recommended: 5 minutes). |
-| `iss` | REQUIRED | Issuer identifier. MUST be a root administrative issuer in PEP trust config. |
-| `sub` | REQUIRED | Operator identity (user ID or service account) invoking break-glass. |
-| `aud` | OPTIONAL | Target PEPs or workspaces. If present, PEP MUST verify membership. |
-| `scope` | REQUIRED | Object defining bypass scope (see §10.7.2). |
-| `reason` | REQUIRED | Human-readable justification for the override. Logged in telemetry. |
-
-**Example override token payload:**
+Every obligation MUST conform to the following shape:
 
 ```json
 {
-  "jti": "bg_01JFP9K2M3N4P5Q6R7S8T9U0V1",
-  "iat": 1735689600,
-  "exp": 1735689900,
-  "iss": "https://admin.capisc.io",
-  "sub": "user_ops_alice",
-  "aud": ["urn:capiscio:workspace:acme-prod"],
-  "scope": {
-    "methods": ["*"],
-    "routes": ["/v1/agents/*"]
-  },
-  "reason": "Emergency restore after PDP outage incident INC-2026-001"
+  "type": "<string>",
+  "params": { }
 }
 ```
 
+* `type` is a string identifying the obligation kind. Types are deployment-defined; this specification does not mandate a vocabulary.
+* `params` is an opaque object carrying obligation-specific parameters.
+
+Obligations are returned by the PDP and enforced by the PEP. The PDP does not enforce obligations.
+
+### 7.2 Enforcement Mode Obligation Matrix
+
+Obligation handling varies by the active Enforcement Mode (RFC-008 §10):
+
+| Enforcement Mode | Obligation Handling |
+|-----------------|---------------------|
+| EM-OBSERVE | Obligations are logged. Enforcement is not attempted. |
+| EM-GUARD | Obligations are logged. Enforcement is best-effort; failure does not block. |
+| EM-DELEGATE | Obligations MUST be attempted. Failure is logged but does not block the request. |
+| EM-STRICT | Obligations MUST be enforced. Failure to enforce any obligation MUST block the request. |
+
+### 7.3 Unrecognized Obligations
+
+If a PEP receives an obligation with a `type` it does not recognize:
+
+| Enforcement Mode | Behavior |
+|-----------------|----------|
+| EM-OBSERVE | Log and skip. |
+| EM-GUARD | Log and skip. |
+| EM-DELEGATE | Log warning; proceed (best-effort). |
+| EM-STRICT | MUST DENY. An unrecognized obligation cannot be enforced, therefore fail-closed. |
+
+### 7.4 Default Failure Policy
+
+The default policy is fail-closed. If the PDP is unreachable and no cached decision is available, the PEP MUST deny the request, with one exception:
+
+**EM-OBSERVE mode:** In EM-OBSERVE, PDP unavailability MAY result in ALLOW, since EM-OBSERVE is non-blocking by definition (RFC-008 §10). However, the PEP MUST emit `capiscio.policy.decision = "ALLOW_OBSERVE"` to distinguish this from a PDP-evaluated ALLOW. All other Enforcement Modes MUST deny on PDP unavailability.
+
+When enforcement fails due to PDP unavailability, the PEP MUST emit:
+
+* Metric (RECOMMENDED): `capiscio_pep_pdp_unreachable_count`
+* Log attribute (REQUIRED): `capiscio.policy.error_code = PDP_UNAVAILABLE`
+* Log attribute (REQUIRED in EM-OBSERVE fallback): `capiscio.policy.decision = ALLOW_OBSERVE`
+
 ---
 
-## 11. Telemetry and Observability
+## 8. Constraint Narrowing (Normative)
 
-To enable a durable chain of custody and policy forensics, implementations MUST be capable of emitting structured telemetry events.
+This section defines the PDP's role in validating the monotonic narrowing invariant (RFC-008 §8).
 
-### 11.1 Canonical Policy Event Schema (Normative)
+### 8.1 PDP Responsibility
 
-When a decision is enforced, the PEP MUST be capable of emitting a structured event with these fields.
+When a decision request includes `context.parent_constraints` (i.e., the Envelope is derived, not root), the PDP MUST evaluate whether `context.constraints` represents a valid narrowing of `context.parent_constraints`.
+
+* Narrowing validation is **semantic** — it depends on constraint types known to the PDP's policy logic.
+* The PEP MUST NOT attempt semantic narrowing validation. The PEP's role is to project both constraint sets into the request and enforce the PDP's decision.
+
+### 8.2 Narrowing Rules
+
+* If `context.parent_constraints` is `null` (root Envelope), no narrowing check applies.
+* If `context.parent_constraints` is non-null, the PDP MUST confirm that the child's effective authority is a subset of or equal to the parent's.
+* If the PDP does not recognize a constraint type present in either `constraints` or `parent_constraints`, it MUST treat narrowing as **unverifiable** and return DENY. Unrecognized constraints cannot be validated for subset relationships.
+* If the PDP determines that narrowing is violated (child authority exceeds parent), it MUST return DENY.
+
+### 8.3 PEP Narrowing Guard
+
+If a decision request includes non-null `context.parent_constraints` and the PDP returns ALLOW, the PEP MUST verify that the PDP's response acknowledges narrowing was evaluated. If the PDP does not support narrowing validation (i.e., it ignores `parent_constraints` and returns ALLOW unconditionally), the PEP MUST treat this as a misconfiguration and DENY the request.
+
+This prevents a naïve PDP from silently collapsing the delegation invariant.
+
+### 8.4 Security Invariant
+
+Constraint narrowing is the authority escalation guardrail. Without it, a delegated Envelope could claim broader authority than its parent granted. The PDP is the sole component responsible for enforcing this invariant at the semantic level. If narrowing validation is absent or advisory-only, the delegation model provides no escalation protection.
+
+---
+
+## 9. Break-Glass Override (Normative)
+
+Break-glass is an exceptional mechanism to bypass PDP authorization during outages. It is not an alternative authorization path.
+
+### 9.1 Override Token
+
+A break-glass override token is a signed JWS with the following REQUIRED claims:
+
+| Claim | Description |
+|-------|-------------|
+| `jti` | Unique token identifier. |
+| `iat` | Issued-at (Unix seconds). |
+| `exp` | Expiration (Unix seconds). SHOULD be short (RECOMMENDED: 5 minutes). |
+| `iss` | Root administrative issuer, configured in PEP trust. |
+| `sub` | Operator identity invoking break-glass. |
+| `scope` | Object defining bypass scope: `methods` (array, supports `"*"`) and `routes` (array, supports prefix wildcards). |
+| `reason` | Human-readable justification. |
+
+### 9.2 Enforcement Rules
+
+* When a valid override token is present, the PEP MUST skip PDP evaluation entirely and emit a policy enforcement event with `decision = "ALLOW"` and `capiscio.policy.override = true`.
+* Override tokens MUST be cryptographically validated before use.
+* Override MUST NOT bypass authentication — only authorization.
+* Override MUST be visible in telemetry: `capiscio.policy.override = true`, `capiscio.policy.override_jti = <jti>`.
+* PEPs MUST apply deterministic scope matching: exact match wins over wildcards; prefix wildcards match by string prefix; `"*"` matches all.
+
+---
+
+## 10. Telemetry (Normative)
+
+PIP adds two REQUIRED telemetry fields to the CapiscIO canonical telemetry set (RFC-004 §10):
 
 | Field | Type | Description |
 |---|---|---|
-| `capiscio.txn_id` | String | Stable workflow transaction ID (RFC-004). |
-| `capiscio.hop.hop_id` | String | Current hop ID if present (RFC-004). |
-| `capiscio.agent.did` | String | Acting agent DID. |
-| `capiscio.badge.jti` | String | Trust Badge JTI. |
-| `capiscio.policy.decision` | String | `allow` or `deny`. |
-| `capiscio.policy.decision_id` | String | Decision ID (required). |
-| `capiscio.policy.bundle_id` | String | Bundle ID used for decision. |
-| `capiscio.policy.bundle_version` | String | Bundle version. |
-| `capiscio.policy.policy_ids` | Array | Policy identifiers that contributed to the decision. |
-| `capiscio.policy.obligations` | Array | Obligation types applied (not full params by default). |
-| `event.name` | String | RECOMMENDED: `capiscio.policy_enforced`. |
+| `capiscio.policy.decision_id` | String | The `decision_id` from the PDP response. REQUIRED on every policy enforcement event. |
+| `capiscio.policy.decision` | String | `ALLOW`, `DENY`, or `ALLOW_OBSERVE`. REQUIRED on every policy enforcement event. |
 
-**Redaction default:** Implementations SHOULD log obligation types but not full parameters unless explicitly enabled.
+PEPs MUST emit these fields on every decision enforcement. Correlation with `capiscio.txn_id`, `capiscio.hop_id`, `capiscio.badge.jti`, and `capiscio.authority.envelope_hash` follows the conventions defined in RFC-004 §10 and RFC-008 §9.2.
 
-#### 11.1.1 Event Schema to OTel Attribute Mapping (Normative)
+Implementations SHOULD use event name `capiscio.policy_enforced`.
 
-The event schema uses nested field names (e.g., `capiscio.hop.hop_id`) while OTel span attributes are typically flat. Implementations MUST use the following canonical mapping:
+Logging MUST NOT include full tokens, badge payloads, or override token contents. Log `decision_id`, `badge_jti`, and `override_jti` only.
 
-| Event Schema Field | OTel Span Attribute |
-|--------------------|--------------------|
-| `capiscio.txn_id` | `capiscio.txn_id` |
-| `capiscio.hop.hop_id` | `capiscio.hop_id` |
-| `capiscio.agent.did` | `capiscio.agent.did` |
-| `capiscio.badge.jti` | `capiscio.badge.jti` |
-| `capiscio.policy.decision` | `capiscio.policy.decision` |
-| `capiscio.policy.decision_id` | `capiscio.policy.decision_id` |
-| `capiscio.policy.bundle_id` | `capiscio.policy.bundle_id` |
-| `capiscio.policy.bundle_version` | `capiscio.policy.bundle_version` |
-| `capiscio.policy.override` | `capiscio.policy.override` |
-| `capiscio.policy.override_jti` | `capiscio.policy.override_jti` |
+---
 
-Note: `capiscio.hop.hop_id` in events maps to `capiscio.hop_id` in OTel for consistency with RFC-004 OTel conventions.
+## 11. Security Considerations
 
-### 11.2 OpenTelemetry Mapping (Normative)
+* **PDP unreachability.** Default fail-closed. PEPs MUST NOT silently allow requests when the PDP cannot be reached unless an explicit break-glass override is active or the Enforcement Mode is EM-OBSERVE (see §7.4).
+* **Constraint bypass risk.** If narrowing validation is not performed (PDP does not support it, or the PEP short-circuits), the delegation chain provides no escalation protection. Deployments MUST ensure their PDP validates narrowing for all recognized constraint types.
+* **Obligation enforcement gaps.** In EM-DELEGATE mode, obligation failures are tolerated. Deployments transitioning to EM-STRICT MUST audit obligation support before switching modes.
+* **Break-glass abuse.** Override tokens are powerful. Short TTLs, mandatory telemetry, and operator identity recording are the primary controls. Deployments SHOULD alert on override token usage.
 
-If OpenTelemetry is used:
+---
 
-- `capiscio.policy.decision_id` MUST be a span attribute.
-- `capiscio.txn_id` SHOULD map to the OTel TraceId when `txn_id` is a UUID (v4 or v7) by using the underlying 16 bytes.
-  - If `txn_id` is not a UUID, generate a new TraceId and attach `capiscio.txn_id` as an attribute.
+## 12. Future Work
 
-Minimum span attributes:
+* Standardized constraint vocabulary registry for common narrowing patterns.
+* Federated PDP trust for cross-organizational policy evaluation.
+* Richer obligation types (DLP classifiers, sandboxing, human-in-the-loop workflows).
 
-```yaml
-capiscio.txn_id: <txn_id>
-capiscio.hop_id: <hop_id>
-capiscio.agent.did: <did>
-capiscio.badge.jti: <badge_jti>
-capiscio.policy.decision: <allow|deny>
-capiscio.policy.decision_id: <decision_id>
-capiscio.policy.bundle_id: <bundle_id>
-capiscio.policy.bundle_version: <bundle_version>
+---
+
+## Appendix A: Illustrative Obligation Types (Non-Normative)
+
+The following obligation types are provided as interoperability examples. They are not normative. Deployments MAY define any obligation types their PEPs can enforce.
+
+### rate_limit.apply
+
+```json
+{
+  "type": "rate_limit.apply",
+  "params": {
+    "rpm": 10,
+    "key": "rate_limit:{{subject.did}}"
+  }
+}
 ```
 
-### 11.3 Logging and Redaction (Normative)
+PEPs SHOULD support `{{field}}` template substitution in `params` values using decision request fields. If templating is not supported, treat values as literals and log a warning.
 
-1. No full tokens: do not log break-glass tokens, hop JWS, or badge JWTs by default.
-2. JTI only: logging `badge_jti` is required; logging full badge payload is forbidden by default.
-3. Payload capture: if a deployment enables request capture, it MUST be explicitly opt-in and controlled.
+### redact.fields
 
-### 11.4 Vendor Export Guidelines (Non-Normative)
+```json
+{
+  "type": "redact.fields",
+  "params": {
+    "fields": ["/pii/email", "/pii/phone"]
+  }
+}
+```
 
-- Datadog:
-  - Map `capiscio.txn_id` to trace id when possible.
-  - Map `capiscio.agent.did` to a principal identifier for pivoting.
-- Splunk / ELK:
-  - Index `capiscio.*` fields as keyword strings.
-- Honeycomb:
-  - Use `capiscio.txn_id` as a high-cardinality grouping key.
+`fields` uses JSON Pointer (RFC 6901) for unambiguous path references.
 
----
+### log.enhanced
 
-## 12. APIs (Reference)
+```json
+{
+  "type": "log.enhanced",
+  "params": {
+    "level": "audit",
+    "include_params_hash": true
+  }
+}
+```
 
-This section is descriptive and may be implemented differently by deployments.
+### require_step_up
 
-### 12.1 PDP Decision API (Online Mode)
+```json
+{
+  "type": "require_step_up",
+  "params": {
+    "mode": "human_review"
+  }
+}
+```
 
-`POST /v1/policy/decide`
-
-Request: decision input (see §8)  
-Response: decision response (see §9)
-
-### 12.2 Bundle APIs
-
-- `GET /v1/policy/bundles/latest`
-- `GET /v1/policy/bundles/{bundle_id}`
-
----
-
-## 13. Security Considerations
-
-- PEPs MUST verify bundle signatures and enforce issuer allowlists.
-- PEPs MUST treat `subject.badge_jti` and `subject.did` as security-relevant. Do not accept missing binding fields in production unless explicitly configured.
-- Bundle endpoints and PDP endpoints MUST implement SSRF defenses where they fetch remote resources (if any).
-- Break-glass tokens are powerful. They MUST be short-lived, auditable, and restricted to trusted operational identities.
-
----
-
-## 14. Implementation Notes
-
-### 14.1 Engine Agnosticism
-
-The contract supports OPA, Cedar, and custom engines by standardizing the input and output shape.
-
-### 14.2 Route Canonicalization
-
-Mapping raw HTTP paths to templates requires configuration (for example OpenAPI). When canonicalization is not possible, pass raw paths and avoid fragile exact-match policies.
-
-### 14.3 Policy Authoring Guidance
-
-Prefer policies that match on:
-- action name
-- audience
-- subject trust level and ial
-- route prefix rather than full raw paths
-
-### 14.4 Offline Evaluation
-
-Offline evaluation SHOULD be limited to a bounded set of rules. Use online PDP for high-complexity decisions when possible.
-
----
-
-## 15. Future Work
-
-- Standardized metrics derivation (for example `capiscio.policy.hop_latency_ms`).
-- Head-based sampling rules for high-value `txn_id`s.
-- Per-request proof binding between hop attestations and policy decisions.
-- Federated policy issuers and cross-CA policy trust.
-- Richer obligation types (for example DLP classifiers, sandboxing, human-in-the-loop workflows).
+PEP MUST block the action until the step-up condition is satisfied. Behavior is deployment-specific.
 
 ---
 
@@ -634,5 +409,6 @@ Offline evaluation SHOULD be limited to a bounded set of rules. Use online PDP f
 
 | Version | Date | Changes |
 |---|---|---|
-| 0.2 | 2026-01-02 | **Added:** Bundle signing format (§6.4) with JWS wire format and key discovery; digest canonicalization rules (§6.3.1); SSRF hardening for JWKS fetch; Override token required claims (§10.7.4). **Changed:** `redact` obligation now uses JSON Pointer (RFC 6901) instead of dotted paths. **Added:** Event-to-OTel attribute mapping table (§11.1.1). |
-| 0.1 | 2025-12-24 | Initial draft. Includes obligations, signed bundles, decision contract, telemetry with decision_id, route canonicalization note, break-glass override with wildcard scope support, and fail-closed operational telemetry guidance. |
+| 1.0 | 2026-02-25 | Complete rewrite: PDEP replaced with PDP Integration Profile (PIP). Removed policy bundles, distribution, PAP, offline evaluation. Added envelope-aware decision request schema (§5), constraint narrowing as PDP responsibility (§8), enforcement mode obligation matrix (§7.2), decision caching temporal bounds (§6.3), PEP narrowing misconfiguration guard (§8.3), EM-OBSERVE PDP unavailability exception (§7.4), break-glass deterministic PDP skip (§9.2). Obligation types demoted to non-normative appendix. |
+| 0.2 | 2026-01-02 | (PDEP) Bundle signing format, digest canonicalization, SSRF hardening, override token claims. |
+| 0.1 | 2025-12-24 | (PDEP) Initial draft. |
