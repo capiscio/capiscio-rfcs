@@ -159,6 +159,9 @@ Identities and policies must be revocable mid-flight.
     - *Note:* Cold start latency (bundle fetch) <50ms. Bundle TTL default is 60s.
 - **Deployment:** **Hybrid.** Control Plane (Registry/PDP) is SaaS; Data Plane (PEPs) lives in the Customer VPC.
 
+!!! note "Co-Located PDP Deployment (Non-Normative)"
+    A valid deployment variant embeds the PDP within the same process as the PEP (e.g., an OPA evaluator embedded in the CapiscIO server). In this configuration, policy evaluation is in-process with no network hop, reducing decision latency to sub-millisecond. The co-located PDP implements the same `PDPClient` interface as an external PDP; the PEP middleware is unaware of whether the PDP is local or remote. See RFC-005 Appendix B for the reference implementation details.
+
 ---
 
 ## Changelog
