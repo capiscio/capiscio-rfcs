@@ -461,9 +461,11 @@ Staleness handling per enforcement mode:
 | Mode | Bundle Stale Behavior |
 |------|----------------------|
 | EM-OBSERVE | Allow with `BUNDLE_STALE` telemetry warning |
-| EM-GUARD | (Deployment-specific — see operator configuration) |
+| EM-GUARD | Allow with `BUNDLE_STALE` telemetry warning |
 | EM-DELEGATE | Allow with `BUNDLE_STALE` telemetry warning |
 | EM-STRICT | Deny with error code `BUNDLE_STALE` |
+
+EM-GUARD allows on stale because stale data is not absent data — the evaluator ran and returned a decision from a valid policy. EM-GUARD's contract is to block on PDP DENY; bundle staleness is a data freshness concern, not a policy denial. Operators requiring fail-closed behavior on staleness SHOULD use EM-STRICT. The staleness threshold is configurable; operators who want tighter freshness guarantees can lower it and pair with alerting on `BUNDLE_STALE` telemetry.
 
 Bundle staleness is distinct from PDP unavailability (§7.4). The evaluator is available and returns a decision; the concern is whether the policy data is current.
 
