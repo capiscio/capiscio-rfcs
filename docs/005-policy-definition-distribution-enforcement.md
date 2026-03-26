@@ -426,31 +426,50 @@ This co-located deployment eliminates PDP network latency from the hot path. Pol
 The PIP decision request (§5) maps directly to the OPA `input` document:
 
 ```
-input.pip_version       → "capiscio.pip.v1"
-input.subject.did       → Agent DID (e.g., "did:web:example.com:agents:bot")
-input.subject.badge_jti → Badge session identifier
-input.subject.ial       → Identity Assurance Level
-input.subject.trust_level → Trust level string (e.g., "DV", "OV")
-input.action.operation  → Route template (e.g., "POST /api/v1/badges")
+input.pip_version            → "capiscio.pip.v1"
+input.subject.did            → Agent DID (e.g., "did:web:example.com:agents:bot")
+input.subject.badge_jti      → Badge session identifier
+input.subject.ial            → Identity Assurance Level
+input.subject.trust_level    → Trust level string (e.g., "DV", "OV", "EV")
+input.action.operation       → Route template (e.g., "POST /api/v1/badges")
+input.action.mcp_tool        → MCP tool name (e.g., "database_query"); empty when not applicable
 input.action.capability_class → Capability class (null in badge-only mode)
-input.resource.identifier → Resource path
-input.context.txn_id    → Transaction ID
+input.resource.identifier    → Resource path
+input.context.txn_id         → Transaction ID
+input.context.hop_id         → Delegation chain hop identifier
+input.context.envelope_id    → AGCP envelope identifier
+input.context.delegation_depth → Delegation depth counter
 input.context.enforcement_mode → Active enforcement mode string
-input.environment.workspace → Workspace identifier
-input.environment.pep_id → PEP instance identifier
-input.environment.time  → ISO 8601 UTC timestamp
+input.environment.workspace  → Workspace identifier
+input.environment.pep_id     → PEP instance identifier
+input.environment.time       → ISO 8601 UTC timestamp
 ```
 
-Rego policies access these attributes via `input.subject.trust_level`, `input.action.operation`, etc.
+Rego policies access these attributes via `input.subject.trust_level`, `input.action.operation`, `input.action.mcp_tool`, etc.
+
+!!! note "pip_version in embedded evaluator"
+    The embedded server evaluator currently omits `input.pip_version` from the OPA input map (the field is populated in the capiscio-core standalone OPA client). Both paths are functionally equivalent; the starter Rego policies do not reference `pip_version`.
 
 ### B.3 Bundle Structure
 
 The reference PDP uses OPA's native bundle format. The bundle server endpoint (`/v1/bundles/:workspace_id`) serves bundles containing:
 
 * **Policy rules** (`.rego` files): Authored via the governance workbench or CLI.
-* **Data payload** (`data.json`): Built from live registry state — agent DIDs, trust levels, IAL values, registered MCP server tools, and capability class namespaces.
+* **Data payload** (`data.json`): Built from live registry state.
 
-When registry state changes (agent registration, trust level update, badge issuance), the data payload is rebuilt. The embedded OPA instance polls the bundle endpoint and picks up changes on the next poll cycle.
+The data payload carries several top-level keys:
+
+| Key | Contents |
+|-----|----------|
+| `agents` | Registered agent DIDs, status, and (when available) trust levels, IAL values, capability classes |
+| `mcp_servers` | Registered MCP server DIDs, names, status, and (when available) tool lists |
+| `config` | Active policy configuration parsed from the approved YAML (trust levels, DID lists, operation and MCP tool scopes, rate limits) |
+| `resolved_policies` | Merged/resolved policy documents per scope (org, group, agent) |
+| `policy_lineage` | Parent→child version chain linking policy document history |
+
+The bundle builder supports trust level, IAL, capability class, and tool fields on agents and MCP servers. Whether these fields are populated depends on the data adapter wiring; the default server adapter currently provides agent ID/DID/status and MCP server DID/name/status.
+
+When registry state changes (agent registration, trust level update, badge issuance, policy approval), the data payload is rebuilt. The embedded OPA instance polls the bundle endpoint and picks up changes on the next poll cycle.
 
 ### B.4 Bundle Staleness
 
@@ -473,10 +492,27 @@ Bundle staleness is distinct from PDP unavailability (§7.4). The evaluator is a
 
 The reference PDP ships with starter Rego policies covering common authorization patterns:
 
-* **Minimum trust level** — Require agents to hold at least a specified trust level (e.g., DV) for protected routes.
-* **DID allowlist/denylist** — Permit or block specific agent DIDs.
-* **Route-scoped access** — Restrict operations by route pattern and HTTP method.
-* **Rate-limit obligation** — Return `rate_limit.apply` obligations keyed by agent DID.
+**Global rules** (apply to all requests):
+
+* **Minimum trust level** — Require agents to hold at least a specified trust level (e.g., DV).
+* **DID denylist** — Block specific agent DIDs regardless of trust level.
+* **DID allowlist** — Restrict access to an explicit set of agent DIDs.
+
+**Operation-scoped rules** (apply when `input.action.operation` matches a configured pattern):
+
+* **Operation trust level** — Require a higher trust level for specific operations (e.g., EV for `agent.invoke`).
+* **Operation allowed DIDs** — Restrict a specific operation to an explicit set of agent DIDs.
+* **Operation denied DIDs** — Block specific agent DIDs from a specific operation.
+
+**MCP tool-scoped rules** (apply when `input.action.mcp_tool` matches a configured tool name):
+
+* **MCP tool trust level** — Require a higher trust level for specific MCP tools (e.g., EV for `database_query`).
+* **MCP tool denied DIDs** — Block specific agent DIDs from a specific MCP tool.
+* **MCP tool allowed DIDs** — Restrict a specific MCP tool to an explicit set of agent DIDs.
+
+**Obligations:**
+
+* **Rate-limit obligation** — Return `rate_limit.apply` obligations with per-agent RPM limits.
 
 These policies serve as working examples and a starting point for customization. They are not normative and may be replaced entirely.
 
