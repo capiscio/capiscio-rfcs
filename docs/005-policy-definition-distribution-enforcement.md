@@ -73,6 +73,9 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 * PDP availability strategies or failover architectures.
 * Replacing OpenTelemetry or vendor-specific telemetry integrations.
 
+!!! note "Implementation Note: Bundle-Based PDP Internals"
+    A PDP implementation MAY use internal bundle-based caching (e.g., OPA policy bundles loaded from a local or co-located bundle server) to optimize evaluation latency. Such internal caching is an implementation detail of the PDP, invisible to the PEP at the wire contract level. The schemas and semantics defined in this specification apply regardless of whether the PDP evaluates policy from a remote bundle, an in-memory cache, or an embedded rule engine.
+
 ---
 
 ## 5. Decision Request Schema (Normative)
@@ -178,6 +181,9 @@ PEPs MUST NOT cache a decision beyond the **earliest** of:
 This prevents temporal authority extension — a cached ALLOW decision MUST NOT outlive the artifacts that justified it.
 
 PEPs MUST NOT cache DENY decisions unless explicitly configured.
+
+!!! note "Bundle-Level vs Decision-Level Caching"
+    The caching rules in this section govern **decision-level caching** — storing the result of a specific PDP evaluation for a specific request. A PDP that uses **bundle-level caching** (e.g., evaluating policy rules against locally-cached policy data) computes fresh decisions on every request using cached policy rather than cached decisions. Both approaches are valid. Bundle-level caching does not violate the temporal bounds above because each evaluation produces a new decision; the cached artifact is the policy definition, not a prior authorization result.
 
 ### 6.4 Example Response
 
@@ -405,10 +411,118 @@ PEP MUST block the action until the step-up condition is satisfied. Behavior is 
 
 ---
 
+## Appendix B: Reference PDP Architecture (Non-Normative)
+
+This appendix describes the reference PDP implementation shipped with the CapiscIO server. It is informational and does not impose requirements on other PDP implementations.
+
+### B.1 Architecture
+
+The reference PDP embeds an OPA evaluator (using the OPA Go SDK) directly within `capiscio-server`. The PEP middleware calls the embedded evaluator via the `PDPClient` interface — the same interface used for external HTTP-based PDPs. No network call is involved; evaluation is in-process.
+
+This co-located deployment eliminates PDP network latency from the hot path. Policy evaluation runs against locally-cached policy bundles, producing sub-millisecond decision times.
+
+### B.2 PIP-to-OPA Input Mapping
+
+The PIP decision request (§5) maps directly to the OPA `input` document:
+
+```
+input.pip_version            → "capiscio.pip.v1"
+input.subject.did            → Agent DID (e.g., "did:web:example.com:agents:bot")
+input.subject.badge_jti      → Badge session identifier
+input.subject.ial            → Identity Assurance Level
+input.subject.trust_level    → Trust level string (e.g., "DV", "OV", "EV")
+input.action.operation       → Route template (e.g., "POST /api/v1/badges")
+input.action.mcp_tool        → MCP tool name (e.g., "database_query"); empty when not applicable
+input.action.capability_class → Capability class (null in badge-only mode)
+input.resource.identifier    → Resource path
+input.context.txn_id         → Transaction ID
+input.context.hop_id         → Delegation chain hop identifier
+input.context.envelope_id    → AGCP envelope identifier
+input.context.delegation_depth → Delegation depth counter
+input.context.enforcement_mode → Active enforcement mode string
+input.environment.workspace  → Workspace identifier
+input.environment.pep_id     → PEP instance identifier
+input.environment.time       → ISO 8601 UTC timestamp
+```
+
+Rego policies access these attributes via `input.subject.trust_level`, `input.action.operation`, `input.action.mcp_tool`, etc.
+
+!!! note "pip_version in embedded evaluator"
+    The embedded server evaluator currently omits `input.pip_version` from the OPA input map (the field is populated in the capiscio-core standalone OPA client). Both paths are functionally equivalent; the starter Rego policies do not reference `pip_version`.
+
+### B.3 Bundle Structure
+
+The reference PDP uses OPA's native bundle format. The bundle server endpoint (`/v1/bundles/:workspace_id`) serves bundles containing:
+
+* **Policy rules** (`.rego` files): Authored via the governance workbench or CLI.
+* **Data payload** (`data.json`): Built from live registry state.
+
+The data payload carries several top-level keys:
+
+| Key | Contents |
+|-----|----------|
+| `agents` | Registered agent DIDs, status, and (when available) trust levels, IAL values, capability classes |
+| `mcp_servers` | Registered MCP server DIDs, names, status, and (when available) tool lists |
+| `config` | Active policy configuration parsed from the approved YAML (trust levels, DID lists, operation and MCP tool scopes, rate limits) |
+| `resolved_policies` | Merged/resolved policy documents per scope (org, group, agent) |
+| `policy_lineage` | Parent→child version chain linking policy document history |
+
+The bundle builder supports trust level, IAL, capability class, and tool fields on agents and MCP servers. Whether these fields are populated depends on the data adapter wiring; the default server adapter currently provides agent ID/DID/status and MCP server DID/name/status.
+
+When registry state changes (agent registration, trust level update, badge issuance, policy approval), the data payload is rebuilt. The embedded OPA instance polls the bundle endpoint and picks up changes on the next poll cycle.
+
+### B.4 Bundle Staleness
+
+The reference PDP tracks the age of the loaded policy bundle. If the bundle age exceeds a configurable staleness threshold, the PEP annotates the decision with a `BUNDLE_STALE` indicator.
+
+Staleness handling per enforcement mode:
+
+| Mode | Bundle Stale Behavior |
+|------|----------------------|
+| EM-OBSERVE | Allow with `BUNDLE_STALE` telemetry warning |
+| EM-GUARD | Allow with `BUNDLE_STALE` telemetry warning |
+| EM-DELEGATE | Allow with `BUNDLE_STALE` telemetry warning |
+| EM-STRICT | Deny with error code `BUNDLE_STALE` |
+
+EM-GUARD allows on stale because stale data is not absent data — the evaluator ran and returned a decision from a valid policy. EM-GUARD's contract is to block on PDP DENY; bundle staleness is a data freshness concern, not a policy denial. Operators requiring fail-closed behavior on staleness SHOULD use EM-STRICT. The staleness threshold is configurable; operators who want tighter freshness guarantees can lower it and pair with alerting on `BUNDLE_STALE` telemetry.
+
+Bundle staleness is distinct from PDP unavailability (§7.4). The evaluator is available and returns a decision; the concern is whether the policy data is current.
+
+### B.5 Starter Policies
+
+The reference PDP ships with starter Rego policies covering common authorization patterns:
+
+**Global rules** (apply to all requests):
+
+* **Minimum trust level** — Require agents to hold at least a specified trust level (e.g., DV).
+* **DID denylist** — Block specific agent DIDs regardless of trust level.
+* **DID allowlist** — Restrict access to an explicit set of agent DIDs.
+
+**Operation-scoped rules** (apply when `input.action.operation` matches a configured pattern):
+
+* **Operation trust level** — Require a higher trust level for specific operations (e.g., EV for `agent.invoke`).
+* **Operation allowed DIDs** — Restrict a specific operation to an explicit set of agent DIDs.
+* **Operation denied DIDs** — Block specific agent DIDs from a specific operation.
+
+**MCP tool-scoped rules** (apply when `input.action.mcp_tool` matches a configured tool name):
+
+* **MCP tool trust level** — Require a higher trust level for specific MCP tools (e.g., EV for `database_query`).
+* **MCP tool denied DIDs** — Block specific agent DIDs from a specific MCP tool.
+* **MCP tool allowed DIDs** — Restrict a specific MCP tool to an explicit set of agent DIDs.
+
+**Obligations:**
+
+* **Rate-limit obligation** — Return `rate_limit.apply` obligations with per-agent RPM limits.
+
+These policies serve as working examples and a starting point for customization. They are not normative and may be replaced entirely.
+
+---
+
 ## Changelog
 
 | Version | Date | Changes |
 |---|---|---|
+| 1.1 | 2026-03-21 | Non-normative additions: §4.2 implementation note on bundle-based PDP internals, §6.3 note distinguishing bundle-level from decision-level caching, Appendix B documenting reference PDP architecture (OPA embed, PIP-to-OPA mapping, bundle structure, staleness behavior, starter policies). |
 | 1.0 | 2026-02-25 | Complete rewrite: PDEP replaced with PDP Integration Profile (PIP). Removed policy bundles, distribution, PAP, offline evaluation. Added envelope-aware decision request schema (§5), constraint narrowing as PDP responsibility (§8), enforcement mode obligation matrix (§7.2), decision caching temporal bounds (§6.3), PEP narrowing misconfiguration guard (§8.3), EM-OBSERVE PDP unavailability exception (§7.4), break-glass deterministic PDP skip (§9.2). Obligation types demoted to non-normative appendix. |
 | 0.2 | 2026-01-02 | (PDEP) Bundle signing format, digest canonicalization, SSRF hardening, override token claims. |
 | 0.1 | 2025-12-24 | (PDEP) Initial draft. |
