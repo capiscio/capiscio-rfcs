@@ -1,10 +1,10 @@
 # RFC-008: Delegated Authority Envelopes
 
-**Version:** 0.2
+**Version:** 0.3
 **Status:** Draft
 **Authors:** CapiscIO Core Team
 **Created:** 2026-01-20
-**Updated:** 2026-02-25
+**Updated:** 2026-04-29
 **Requires:** RFC-001 (AGCP), RFC-002 (Trust Badge Specification), RFC-003 (Key Ownership Proof Protocol), RFC-004 (Transaction and Hop Binding)
 
 ---
@@ -153,6 +153,10 @@ An Authority Envelope is a JWS (JSON Web Signature) in Compact Serialization:
 | `expires_at` | integer | REQUIRED | Unix timestamp (seconds) after which this Envelope MUST be rejected. |
 | `issuer_badge_jti` | string | REQUIRED | The `jti` of the issuer's current Trust Badge (RFC-002). Binds the Envelope to a specific badge session. |
 | `subject_badge_jti` | string ∣ null | REQUIRED | The `jti` of the subject's current Trust Badge. MUST be present for all non-root Envelopes (i.e., where `parent_authority_hash` is non-null). For root Envelopes, MAY be `null` only if the subject has not yet established a badge session; in this case the PEP MUST require an alternative subject authentication mechanism as defined by RFC-002. |
+
+### 5.5 Capability Class Interpretation
+
+The `capability_class` field is an opaque policy input. Interpretation of capability classes, including mapping to specific tool invocations or resource access patterns, is the responsibility of the Policy Decision Point and is outside the scope of this specification. Implementations MUST NOT reject or transform `capability_class` values based on format or vocabulary. Any string conforming to the dot-separated syntax defined in §7.1 is valid.
 
 ---
 
@@ -323,7 +327,40 @@ The PEP MUST execute the following steps in order. Failure at any step MUST resu
 
 9. **PDP Query.** Construct the attribute projection (§11.1) and query the PDP. Enforce the returned decision per RFC-005 (PDP Integration Profile).
 
-### 9.3 Agent Self-Enforcement Prohibition
+### 9.3 Rejection Error Codes
+
+When a PEP denies a request, it MUST return a structured rejection containing an error code from the table below. Rejection responses MUST NOT include hints about what `capability_class` would have been sufficient — that is policy information that MUST NOT leak through the error surface.
+
+| Error Code | Step | Description |
+|------------|------|-------------|
+| `ENVELOPE_MALFORMED` | 3 | The JWS structure or payload cannot be parsed. |
+| `ENVELOPE_SIGNATURE_INVALID` | 3 | JWS signature verification failed. |
+| `ENVELOPE_EXPIRED` | 4 | The envelope has expired (`now >= expires_at`). |
+| `ENVELOPE_NOT_YET_VALID` | 4 | The envelope's `issued_at` is in the future. |
+| `ENVELOPE_ALGORITHM_FORBIDDEN` | 3 | A forbidden signing algorithm was used (`none`, HMAC). |
+| `ENVELOPE_BADGE_BINDING_FAILED` | 6 | The `issuer_badge_jti` or `subject_badge_jti` does not match the presented badge. |
+| `ENVELOPE_CHAIN_BROKEN` | 7 | Chain integrity violation: hash mismatch or DID continuity failure. |
+| `ENVELOPE_NARROWING_VIOLATION` | 7 | Monotonic narrowing invariant violated. |
+| `ENVELOPE_DEPTH_EXCEEDED` | 8 | Attempted delegation with `delegation_depth_remaining == 0`. |
+| `ENVELOPE_KEY_NOT_BOUND` | 2 | Signing key is not bound to the issuer DID via RFC-003. |
+| `ENVELOPE_CAPABILITY_INVALID` | — | Capability class does not conform to §7.1 syntax. |
+| `ENVELOPE_SCOPE_INSUFFICIENT` | 9 | The PDP determined that the envelope's `capability_class` does not cover the requested operation. |
+
+#### 9.3.1 SCOPE_INSUFFICIENT Rejection Payload
+
+When the PDP returns DENY because the envelope's authority does not cover the requested operation, the PEP MUST return `ENVELOPE_SCOPE_INSUFFICIENT` with the following structured evidence:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `error` | string | REQUIRED | `ENVELOPE_SCOPE_INSUFFICIENT` |
+| `requested_capability` | string | REQUIRED | The capability class the agent attempted to invoke. |
+| `presented_capability` | string | REQUIRED | The `capability_class` from the envelope that was evaluated. |
+| `envelope_id` | string | REQUIRED | The `envelope_id` of the insufficient envelope. |
+| `txn_id` | string | REQUIRED | The transaction correlation ID. |
+
+The `requested_capability` and `presented_capability` pair enables future pre-authorization request protocols (see §18) to construct scope expansion requests from rejection payloads without guessing.
+
+### 9.4 Agent Self-Enforcement Prohibition
 
 Agents MUST NOT evaluate their own Authority Envelopes to make authorization decisions. Self-enforcement creates a conflict of interest where the agent being governed is also the authority evaluating governance.
 
@@ -333,7 +370,7 @@ All enforcement MUST occur at a PEP that is architecturally separate from the ag
 * Sidecar proxies and API gateways are acceptable.
 * Agent code that reads its own Envelope and decides whether to proceed is NOT acceptable.
 
-### 9.4 Delegation Validation Performance
+### 9.5 Delegation Validation Performance
 
 For deep delegation chains, PEPs SHOULD implement:
 
@@ -588,7 +625,7 @@ Implementations SHOULD enforce a maximum Envelope payload size of 8 KB to preven
 * **Principal Classification.** An optional `principal_type` claim or equivalent mechanism enabling PDPs to distinguish human, agent, service, and organizational identities without resolving DID metadata. This is additive and backward-compatible.
 * **Dual-Auth / On-Behalf-Of.** Patterns for preserving originator identity alongside actor identity throughout a delegation chain (analogous to OAuth RFC 8693 `act` claim). Candidate mechanisms include parallel claims, co-signed envelopes, or composite authority artifacts. These patterns are orthogonal to the monotonic narrowing model and MUST NOT compromise delegation invariants.
 * **Constraint Vocabulary Registry.** A standardized set of well-known constraint types with defined narrowing semantics, reducing PDP complexity for common patterns.
-* **Envelope Request Protocol.** A protocol for agents to request Authority Envelopes from upstream delegators, enabling automated delegation workflows.
+* **Envelope Request Protocol.** A protocol for agents to request Authority Envelopes from upstream delegators, enabling automated delegation workflows. This includes dynamic scope expansion: when a PEP returns `ENVELOPE_SCOPE_INSUFFICIENT` (§9.3.1), the rejection payload contains the `requested_capability` and `presented_capability` fields necessary to construct a scope expansion request. The request protocol is the subject of RFC-009 (Pre-Authorization Request Protocol).
 * **Selective Disclosure.** Mechanisms for presenting Authority Envelopes to verifiers without revealing the full constraint set (e.g., zero-knowledge proofs of constraint satisfaction).
 * **Revocation.** Dedicated Envelope revocation mechanisms beyond badge-session binding (e.g., Envelope-specific revocation lists).
 
@@ -688,5 +725,6 @@ In the Agent-to-Agent (A2A) protocol, Authority Envelopes are carried as an A2A 
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.3 | 2026-04-29 | Added §5.5 capability class interpretation normative note. Added §9.3 rejection error codes table with `ENVELOPE_SCOPE_INSUFFICIENT`. Added §9.3.1 structured rejection payload for scope-insufficient rejections. Updated §18 Envelope Request Protocol future work with RFC-009 forward reference. Renumbered §9.3→§9.4, §9.4→§9.5. |
 | 0.2 | 2026-02-25 | Root envelope semantics clarified (§6.1). Multi-use envelopes with invocation-layer replay (§12). PDP schema moved to RFC-005 PIP; §11 retains attribute projection only. Algorithm list relaxed (§17.2). Registry outage split into chain retrieval vs revocation (§16). EM-GUARD clarified as identity-enforced/policy-advisory (§10.2). Jailer removed. |
 | 0.1 | 2026-01-20 | Initial draft. |
