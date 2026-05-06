@@ -1,10 +1,10 @@
 # RFC-008: Delegated Authority Envelopes
 
-**Version:** 0.2
-**Status:** Draft
+**Version:** 1.1
+**Status:** Approved
 **Authors:** CapiscIO Core Team
 **Created:** 2026-01-20
-**Updated:** 2026-02-25
+**Updated:** 2026-05-05
 **Requires:** RFC-001 (AGCP), RFC-002 (Trust Badge Specification), RFC-003 (Key Ownership Proof Protocol), RFC-004 (Transaction and Hop Binding)
 
 ---
@@ -27,7 +27,7 @@ This specification defines:
 * Envelope reuse model and invocation-layer replay requirements.
 * Cross-linking with RFC-004 transaction and hop identifiers.
 
-This specification is **transport-agnostic**. Bindings for HTTP, MCP, and A2A are provided as non-normative appendices.
+This specification is **transport-agnostic**. The normative HTTP binding is provided in Appendix A. Non-normative bindings for MCP and A2A are provided in Appendices B and C.
 
 ---
 
@@ -41,6 +41,8 @@ This specification is **transport-agnostic**. Bindings for HTTP, MCP, and A2A ar
 | RFC-004 (TCHB) | Provides the `txn_id` that links Envelopes to the transport-layer hop chain. Hop Attestations MAY carry `authority_envelope_hash` to bind a specific transport hop to the governing authority. |
 | RFC-006 (MCP Tool Authority) | Defines single-hop tool invocation evidence. Authority Envelopes supply the authorization input that RFC-006 enforcement points evaluate. |
 | RFC-007 (MCP Server Identity) | Establishes server identity. The `subject_did` in a root Envelope MAY reference a server DID discovered via RFC-007. |
+| RFC-009 (Pre-Authorized Action Manifest) | RFC-009 Action Manifests declare the specific action surface permitted within the authority established by an RFC-008 Authority Envelope. The manifest does not replace the envelope; it is a pre-registration artifact that the RFC-009 PEP checks before the RFC-005 PDP query runs. The Intent Envelope (RFC-009 §6) references both the `manifest_hash` and the `authority_envelope_hash`, linking the two artifacts at the invocation layer. |
+| RFC-010 (Intent Classification) | RFC-010 Classifier Sub-Agent output is projected into the RFC-005 PIP attribute space as advisory signal before the RFC-008 envelope-based PDP query. RFC-010 does not modify or extend RFC-008 delegation chains. |
 
 ---
 
@@ -78,7 +80,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 * **Policy engine implementation.** This RFC does not define a PDP. It defines the interface between PEPs and external PDPs.
 * **Constraint vocabulary.** Specific constraint types (e.g., IP allowlists, rate limits) are not defined here. The constraints object is opaque to this specification.
-* **Transport binding details.** Normative transport bindings are out of scope. Non-normative appendices illustrate HTTP, MCP, and A2A patterns.
+* **Transport binding details.** Full transport binding specifications for protocols other than HTTP are out of scope. The HTTP binding (Appendix A) is normative. MCP (Appendix B) and A2A (Appendix C) bindings are non-normative illustrations.
 * **Advisory enforcement (Judge).** Advisory, non-blocking evaluation is deferred to future work (§18).
 * **Composition security.** Authority merging across independent delegation chains is deferred to future work (§18).
 * **Principal classification.** Distinguishing human, agent, service, or organizational identities is outside the delegation invariant model. PDP policies requiring identity classification MAY resolve this from DID metadata or via future extensions.
@@ -131,6 +133,7 @@ An Authority Envelope is a JWS (JSON Web Signature) in Compact Serialization:
   "enforcement_mode_min": null,
   "issued_at": 1737331200,
   "expires_at": 1737331500,
+  "prompt_summary": "Generate quarterly sales report for finance team review",
   "issuer_badge_jti": "b8f2c6a5-2d6f-4e44-9f55-2a1d6d9e0f12",
   "subject_badge_jti": "c9a3d7b6-3e7g-5f55-0g66-3b2e7e1f1g23"
 }
@@ -151,8 +154,13 @@ An Authority Envelope is a JWS (JSON Web Signature) in Compact Serialization:
 | `enforcement_mode_min` | string ∣ null | OPTIONAL | Minimum Enforcement Mode the issuer requires of downstream PEPs. If set, MUST be one of: `EM-OBSERVE`, `EM-GUARD`, `EM-DELEGATE`, `EM-STRICT`. PEPs MUST operate at this level or stricter. `null` means no issuer-mandated minimum. |
 | `issued_at` | integer | REQUIRED | Unix timestamp (seconds) of Envelope creation. |
 | `expires_at` | integer | REQUIRED | Unix timestamp (seconds) after which this Envelope MUST be rejected. |
+| `prompt_summary` | string \| null | OPTIONAL | A human-readable, selectively disclosable summary of the originating user's expressed intent or the system's declared task purpose. Maximum 512 characters. This field is informational only and MUST NOT be used for authorization decisions. It is preserved for audit reconstruction and forensic purposes, providing a human-legible record of what the originating principal stated they intended to do. PEPs MUST NOT base enforcement decisions on this field's content. |
 | `issuer_badge_jti` | string | REQUIRED | The `jti` of the issuer's current Trust Badge (RFC-002). Binds the Envelope to a specific badge session. |
 | `subject_badge_jti` | string ∣ null | REQUIRED | The `jti` of the subject's current Trust Badge. MUST be present for all non-root Envelopes (i.e., where `parent_authority_hash` is non-null). For root Envelopes, MAY be `null` only if the subject has not yet established a badge session; in this case the PEP MUST require an alternative subject authentication mechanism as defined by RFC-002. |
+
+### 5.5 Capability Class Interpretation
+
+The `capability_class` field is an opaque policy input. Interpretation of capability classes, including mapping to specific tool invocations or resource access patterns, is the responsibility of the Policy Decision Point and is outside the scope of this specification. Implementations MUST NOT reject or transform `capability_class` values based on format or vocabulary. Any string conforming to the dot-separated syntax defined in §7.1 is valid.
 
 ---
 
@@ -281,6 +289,10 @@ A PEP MUST reject any derived Envelope that violates monotonic narrowing.
 * The PDP MUST evaluate whether the child's constraints are a valid narrowing of the parent's constraints according to its policy logic.
 * If the PDP cannot determine narrowing validity, it MUST return DENY.
 
+**Stateful Constraint Enforcement:**
+
+Some constraint types imply stateful enforcement across multiple envelopes sharing a `txn_id` — for example, a cumulative spend cap or a rate limit expressed as a budget constraint. For stateful constraints, the party in the delegation chain responsible for maintaining authoritative cumulative state MUST be identified in the constraint object. When that state is unavailable (e.g., the state store is unreachable), the PEP MUST treat the constraint as unsatisfied and DENY, consistent with the fail-closed default. Cross-organizational stateful constraint enforcement requires a designated authoritative state keeper agreed upon by all parties in the delegation chain prior to envelope issuance. CapiscIO does not implement a global state store; state management is a deployment responsibility.
+
 The concrete PDP request/response schema and narrowing validation semantics are defined in RFC-005 (PDP Integration Profile).
 
 ---
@@ -313,17 +325,52 @@ The PEP MUST execute the following steps in order. Failure at any step MUST resu
 
 6. **Badge Binding.** Confirm `issuer_badge_jti` matches the presented Badge's `jti`. If `subject_badge_jti` is non-null, confirm it matches the subject's presented Badge.
 
-7. **Chain Integrity.** If `parent_authority_hash` is non-null, retrieve the parent Envelope and verify:
+7. **Chain Integrity.** If `parent_authority_hash` is non-null, retrieve the parent Envelope from the chain presented per §15.1 and verify:
    * `parent_authority_hash` matches `SHA-256(parent JWS)`.
    * `issuer_did` matches parent's `subject_did`.
    * All monotonic narrowing rules (§8) hold.
    * Recurse to the root Envelope.
+   * Resolve badges for each DID in the chain from the badge map (§15.2).
 
 8. **Delegation Depth.** If the request involves further delegation, confirm `delegation_depth_remaining > 0`.
 
 9. **PDP Query.** Construct the attribute projection (§11.1) and query the PDP. Enforce the returned decision per RFC-005 (PDP Integration Profile).
 
-### 9.3 Agent Self-Enforcement Prohibition
+### 9.3 Rejection Error Codes
+
+When a PEP denies a request, it MUST return a structured rejection containing an error code from the table below. Rejection responses MUST NOT include hints about what `capability_class` would have been sufficient — that is policy information that MUST NOT leak through the error surface.
+
+| Error Code | Step | Description |
+|------------|------|-------------|
+| `ENVELOPE_MALFORMED` | 3 | The JWS structure or payload cannot be parsed. |
+| `ENVELOPE_SIGNATURE_INVALID` | 3 | JWS signature verification failed. |
+| `ENVELOPE_EXPIRED` | 4 | The envelope has expired (`now >= expires_at`). |
+| `ENVELOPE_NOT_YET_VALID` | 4 | The envelope's `issued_at` is in the future. |
+| `ENVELOPE_ALGORITHM_FORBIDDEN` | 3 | A forbidden signing algorithm was used (`none`, HMAC). |
+| `ENVELOPE_BADGE_BINDING_FAILED` | 6 | The `issuer_badge_jti` or `subject_badge_jti` does not match the presented badge. |
+| `ENVELOPE_CHAIN_BROKEN` | 7 | Chain integrity violation: hash mismatch or DID continuity failure. |
+| `ENVELOPE_NARROWING_VIOLATION` | 7 | Monotonic narrowing invariant violated. |
+| `ENVELOPE_DEPTH_EXCEEDED` | 8 | Attempted delegation with `delegation_depth_remaining == 0`. |
+| `ENVELOPE_CHAIN_TOO_DEEP` | 7 | The presented chain exceeds the PEP's configured maximum chain length (§15.1.1). |
+| `ENVELOPE_KEY_NOT_BOUND` | 2 | Signing key is not bound to the issuer DID via RFC-003. |
+| `ENVELOPE_CAPABILITY_INVALID` | — | Capability class does not conform to §7.1 syntax. |
+| `ENVELOPE_SCOPE_INSUFFICIENT` | 9 | The PDP determined that the envelope's `capability_class` does not cover the requested operation. |
+
+#### 9.3.1 SCOPE_INSUFFICIENT Rejection Payload
+
+When the PDP returns DENY because the envelope's authority does not cover the requested operation, the PEP MUST return `ENVELOPE_SCOPE_INSUFFICIENT` with the following structured evidence:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `error` | string | REQUIRED | `ENVELOPE_SCOPE_INSUFFICIENT` |
+| `requested_capability` | string | REQUIRED | The capability class the agent attempted to invoke. |
+| `presented_capability` | string | REQUIRED | The `capability_class` from the envelope that was evaluated. |
+| `envelope_id` | string | REQUIRED | The `envelope_id` of the insufficient envelope. |
+| `txn_id` | string | REQUIRED | The transaction correlation ID. |
+
+The `requested_capability` and `presented_capability` pair enables future pre-authorization request protocols (see §18) to construct scope expansion requests from rejection payloads without guessing.
+
+### 9.4 Agent Self-Enforcement Prohibition
 
 Agents MUST NOT evaluate their own Authority Envelopes to make authorization decisions. Self-enforcement creates a conflict of interest where the agent being governed is also the authority evaluating governance.
 
@@ -333,7 +380,7 @@ All enforcement MUST occur at a PEP that is architecturally separate from the ag
 * Sidecar proxies and API gateways are acceptable.
 * Agent code that reads its own Envelope and decides whether to proceed is NOT acceptable.
 
-### 9.4 Delegation Validation Performance
+### 9.5 Delegation Validation Performance
 
 For deep delegation chains, PEPs SHOULD implement:
 
@@ -435,6 +482,8 @@ The wire format for PDP requests and responses, obligation schema, and per-mode 
 
 An Authority Envelope is a delegation grant, not a per-action token. An Authority Envelope MAY authorize multiple actions within its validity window (`issued_at` to `expires_at`). Each action authorized by an Envelope MUST be independently recorded via RFC-004 hop attestation or RFC-006 invocation evidence.
 
+For standing delegations spanning multiple independent workflows, the orchestrator SHOULD issue separate envelopes per `txn_id`. Envelope issuance is lightweight (sub-millisecond Ed25519 signature) and MUST NOT be treated as a bottleneck that justifies decoupling `txn_id` from the signed payload. The `txn_id`-to-envelope binding exists to preserve forensic chain integrity — the ability to answer "which authority was active during this specific transaction" at audit time.
+
 ### 12.2 Invocation-Layer Replay Prevention
 
 Replay prevention for individual actions MUST be implemented at the invocation layer, not the envelope layer:
@@ -515,7 +564,58 @@ This specification is transport-agnostic. Implementations MUST ensure:
 * Envelopes are transmitted as JWS Compact Serialization strings.
 * The transport mechanism provides a dedicated field or header for the Envelope; it MUST NOT be embedded in application-layer payloads where it could be stripped or modified by intermediaries.
 
-Non-normative transport bindings are provided in Appendices A, B, and C.
+Protocol-specific transport bindings are provided in Appendices A, B, and C.
+
+### 15.1 Chain Presentation
+
+When a delegation chain has more than one Envelope, the requesting agent MUST transmit the full chain — all Envelopes from root to leaf, in order — to the receiving PEP. The PEP MUST NOT be required to fetch chain segments from a remote registry as a precondition for verification.
+
+Rationale: delegation chains may cross organizational boundaries where no shared registry exists. A PEP at Organization B cannot be assumed to have access to Organization A's registry. Carrying the full chain in the request makes verification self-contained and eliminates cross-org registry dependencies.
+
+The chain MUST be transmitted as an ordered JSON array of JWS Compact Serialization strings, from root (`E₀`) to leaf (`Eₙ`). The transport binding (§15.3, Appendix A–C) defines where this array is carried.
+
+PEPs MAY cache previously-verified Envelopes by `envelope_id` to optimize repeated verification of the same chain prefix. A PEP that holds a cached and verified prefix MAY accept a partial chain starting from the first uncached link, provided the first element's `parent_authority_hash` matches the cached parent. PEPs MUST re-verify expiration on each use. Revocation re-verification for cached Envelopes is subject to §15.4.
+
+### 15.1.1 Chain Length Limits
+
+PEPs SHOULD enforce a maximum chain length consistent with the deployment's depth ceiling. A PEP that receives a chain longer than its configured maximum MUST reject the request with `ENVELOPE_CHAIN_TOO_DEEP` (§9.3). This is distinct from `ENVELOPE_DEPTH_EXCEEDED`, which applies to delegation attempts at depth zero.
+
+### 15.2 Badge Map
+
+Verification sequence Step 6 (§9.2) requires matching `issuer_badge_jti` and `subject_badge_jti` against presented badges. When a delegation chain involves multiple DIDs, the requesting agent MUST supply the Trust Badge JWS for each DID referenced in the chain.
+
+The badge map MUST be transmitted as a JSON object where keys are DID strings and values are Trust Badge JWS Compact Serialization strings:
+
+```json
+{
+  "did:web:acme.example": "<badge_jws>",
+  "did:web:taxbot.example": "<badge_jws>"
+}
+```
+
+The PEP MUST verify each badge independently per RFC-002 before using it for badge binding checks. A missing badge for any DID in the chain MUST result in denial.
+
+The requesting agent's own badge (the leaf agent) MAY be transmitted via the standard badge transport mechanism (e.g., `Authorization` header) instead of the badge map. Requesting agents SHOULD NOT include the leaf agent's DID in the badge map when the same badge is already present in the standard transport — the duplication creates a reconciliation surface with no benefit. If the same DID appears in both the badge map and the standard badge transport, the PEP MUST use the standard badge transport value.
+
+### 15.3 Transport Binding Requirements
+
+Any conforming transport binding MUST define:
+
+1. Where the chain array (§15.1) is carried.
+2. Where the badge map (§15.2) is carried.
+3. How the leaf Envelope is distinguished when a single-Envelope request omits the chain array (backward compatibility).
+
+The normative HTTP binding (Appendix A) satisfies these requirements. Non-normative bindings (Appendices B–C) illustrate how implementations SHOULD apply these requirements to MCP and A2A.
+
+### 15.4 Cross-Organization Cache Revocation
+
+The rationale for self-contained chains (§15.1) is that a PEP at Organization B cannot access Organization A's registry. This same constraint applies to revocation re-checks on cached Envelopes from foreign organizations.
+
+PEPs MUST enforce a maximum cache TTL for Envelopes whose `issuer_did` resolves to a DID outside the PEP's own organizational trust boundary. The RECOMMENDED maximum cache TTL is 5 minutes. After TTL expiry, the PEP MUST require the requesting agent to re-present the full chain with fresh badges.
+
+Revocation checking for foreign-org badges is inherently best-effort when no cross-org revocation feed exists. PEPs operating in `EM-STRICT` (§10.4) MUST NOT cache foreign-org Envelopes — each request MUST present the full chain with current badges, and badge revocation MUST be verified against the badge's own revocation endpoint (RFC-002 §8) if reachable. If the revocation endpoint is unreachable in `EM-STRICT`, the PEP MUST deny.
+
+For PEPs operating in `EM-GUARD` or `EM-DELEGATE`, the cache TTL bounds the revocation risk window: a revoked badge may be accepted for at most one TTL period after revocation.
 
 ---
 
@@ -563,6 +663,7 @@ PEPs SHOULD cache registry responses (badge revocation lists, trust level metada
 | Constraint widening | PDP evaluates parent-child constraint pairs; DENY on invalid narrowing (§8.5). |
 | Stale authority after badge revocation | `issuer_badge_jti` binding; revocation check in verification sequence step 1. |
 | Infinite delegation depth | `delegation_depth_remaining` decrement; configurable max chain depth (§9.4). |
+| Empty allowlist misconfiguration | A constraint whose allowlist is empty MUST be treated as unsatisfiable, not unrestricted. An empty `allowed_dids`, `allowed_tools`, or `allowed_resources` list means no principal or resource is permitted — not that all are permitted. PEPs MUST enforce this interpretation. PDPs MUST enforce this interpretation for constraint narrowing evaluation. |
 | Registry SSRF via DID resolution | This RFC does not require DID resolution for Envelope verification. If implementations perform DID resolution, they MUST apply SSRF protections per RFC-002 guidance. |
 
 ### 17.2 Cryptographic Requirements
@@ -587,16 +688,19 @@ Implementations SHOULD enforce a maximum Envelope payload size of 8 KB to preven
 * **Composition Security.** Rules for merging or intersecting authority from independent delegation chains. Required for multi-principal workflows where an agent acts on behalf of multiple authorities simultaneously.
 * **Principal Classification.** An optional `principal_type` claim or equivalent mechanism enabling PDPs to distinguish human, agent, service, and organizational identities without resolving DID metadata. This is additive and backward-compatible.
 * **Dual-Auth / On-Behalf-Of.** Patterns for preserving originator identity alongside actor identity throughout a delegation chain (analogous to OAuth RFC 8693 `act` claim). Candidate mechanisms include parallel claims, co-signed envelopes, or composite authority artifacts. These patterns are orthogonal to the monotonic narrowing model and MUST NOT compromise delegation invariants.
+* **Pre-Execution Planning Interface.** Root envelope issuance assumes a prior planning step mapped the originating request to a declared capability class and action type. How that mapping is performed is outside the scope of this RFC. RFC-009 defines the pre-authorized action manifest that serves as the declared-intent artifact. A future revision of this RFC may define a normative interface contract specifying what a valid capability class mapping output must look like before it seeds a root envelope — enabling structured validation of the planning-to-enforcement handoff.
 * **Constraint Vocabulary Registry.** A standardized set of well-known constraint types with defined narrowing semantics, reducing PDP complexity for common patterns.
-* **Envelope Request Protocol.** A protocol for agents to request Authority Envelopes from upstream delegators, enabling automated delegation workflows.
+* **Envelope Request Protocol.** A protocol for agents to request Authority Envelopes from upstream delegators, enabling automated delegation workflows. This includes dynamic scope expansion: when a PEP returns `ENVELOPE_SCOPE_INSUFFICIENT` (§9.3.1), the rejection payload contains the `requested_capability` and `presented_capability` fields necessary to construct a scope expansion request. The request protocol is the subject of RFC-009 (Pre-Authorization Request Protocol).
 * **Selective Disclosure.** Mechanisms for presenting Authority Envelopes to verifiers without revealing the full constraint set (e.g., zero-knowledge proofs of constraint satisfaction).
 * **Revocation.** Dedicated Envelope revocation mechanisms beyond badge-session binding (e.g., Envelope-specific revocation lists).
 
 ---
 
-## Appendix A: HTTP Binding (Non-Normative)
+## Appendix A: HTTP Binding
 
-Authority Envelopes SHOULD be transmitted via a dedicated HTTP header:
+Authority Envelopes MUST be transmitted via dedicated HTTP headers per §15.
+
+**Single-Envelope request (no delegation chain):**
 
 ```http
 POST /v1/tools/database/query HTTP/1.1
@@ -610,16 +714,46 @@ Content-Type: application/json
 { "query": "SELECT * FROM users WHERE active = true" }
 ```
 
-* `X-Capiscio-Authority` carries the Authority Envelope.
-* `Authorization` carries the Trust Badge.
-* `X-Capiscio-Txn` and `X-Capiscio-Hop` carry RFC-004 artifacts.
-* When a delegation chain has multiple Envelopes, the full chain MAY be transmitted as a comma-separated list in `X-Capiscio-Authority` or via a `X-Capiscio-Authority-Chain` header containing the JSON array of JWS strings.
+**Multi-Envelope request (delegation chain):**
+
+```http
+POST /v1/tools/invoice/write HTTP/1.1
+Host: api.acme.example
+Authorization: Bearer <callers_own_badge_jws>
+X-Capiscio-Txn: 018f4e1d-7e5d-7a9f-a9d2-8b6a0f2c9b11
+X-Capiscio-Hop: <hop_attestation_jws>
+X-Capiscio-Authority: <leaf_envelope_jws>
+X-Capiscio-Authority-Chain: <base64url(JSON array of JWS strings, root to leaf)>
+X-Capiscio-Badge-Map: <base64url(JSON object, DID → badge JWS)>
+Content-Type: application/json
+
+{ "invoice_id": "INV-2026-0042" }
+```
+
+**Header definitions:**
+
+| Header | §15 Requirement | Description |
+|--------|-----------------|-------------|
+| `Authorization` | Standard badge transport | The requesting agent's own Trust Badge (leaf agent). |
+| `X-Capiscio-Authority` | Leaf Envelope | The leaf Authority Envelope JWS. For single-Envelope requests, this is the only envelope header required. |
+| `X-Capiscio-Authority-Chain` | Chain array (§15.1) | Base64url-encoded JSON array of JWS Compact Serialization strings, ordered root to leaf. REQUIRED when the delegation chain has more than one Envelope. The leaf Envelope in this array MUST match `X-Capiscio-Authority`. The leaf is intentionally present in both locations: `X-Capiscio-Authority` provides backward-compatible leaf identification for single-Envelope code paths, while the chain array carries the complete ordered sequence for chain verification. |
+| `X-Capiscio-Badge-Map` | Badge map (§15.2) | Base64url-encoded JSON object mapping DID strings to Trust Badge JWS strings. REQUIRED when the chain involves DIDs other than the requesting agent's own DID (whose badge is in `Authorization`). |
+| `X-Capiscio-Txn` | RFC-004 | Transaction ID. |
+| `X-Capiscio-Hop` | RFC-004 | Hop attestation JWS. |
+
+**Backward compatibility:** A PEP that receives `X-Capiscio-Authority` without `X-Capiscio-Authority-Chain` MUST treat the request as a single-Envelope (root) request. If the Envelope's `parent_authority_hash` is non-null in this case, the PEP MUST reject the request with `ENVELOPE_CHAIN_BROKEN` — a derived Envelope without its chain is unverifiable.
+
+**Size considerations:** Base64url encoding adds ~33% overhead. A 3-hop chain with 1.5 KB per Envelope JWS produces ~6 KB of chain data. The badge map adds ~1.5 KB per DID (badge JWS size). A 3-hop cross-org chain with 3 distinct DIDs produces ~6 KB (chain) + ~4.5 KB (badges) + base64url overhead ≈ ~14 KB total, within the 16 KB default header limit for most HTTP servers and proxies. A 6-hop chain (the practical maximum for most deployments) could approach or exceed this limit. Implementations SHOULD support chains up to the PEP's configured maximum chain length (§15.1.1).
+
+A body-based transport for chains exceeding header size limits is deferred to a future revision of this specification. Implementations that encounter header size limits SHOULD reduce chain depth rather than introduce unspecified body transports.
 
 ---
 
 ## Appendix B: MCP Binding (Non-Normative)
 
-In MCP JSON-RPC contexts, Authority Envelopes SHOULD be included in the request metadata:
+In MCP JSON-RPC contexts, Authority Envelopes are included in the `_meta.capiscio` namespace per §15.3.
+
+**Single-Envelope request:**
 
 ```json
 {
@@ -639,13 +773,46 @@ In MCP JSON-RPC contexts, Authority Envelopes SHOULD be included in the request 
 }
 ```
 
+**Multi-Envelope request (delegation chain):**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "write_invoice",
+    "arguments": { "invoice_id": "INV-2026-0042" },
+    "_meta": {
+      "capiscio": {
+        "authority_envelope": "<leaf_envelope_jws>",
+        "authority_chain": ["<root_envelope_jws>", "<leaf_envelope_jws>"],
+        "badge_map": {
+          "did:web:acme.example": "<badge_jws>",
+          "did:web:taxbot.example": "<badge_jws>"
+        },
+        "txn_id": "018f4e1d-7e5d-7a9f-a9d2-8b6a0f2c9b11",
+        "hop_attestation": "<hop_attestation_jws>"
+      }
+    }
+  }
+}
+```
+
+**Field mapping per §15.3:**
+
+| §15 Requirement | MCP Field | Notes |
+|-----------------|-----------|-------|
+| Chain array (§15.1) | `_meta.capiscio.authority_chain` | JSON array of JWS strings, root to leaf. |
+| Badge map (§15.2) | `_meta.capiscio.badge_map` | JSON object, DID → badge JWS. |
+| Leaf Envelope | `_meta.capiscio.authority_envelope` | Single-Envelope backward compatibility. |
+
 The `_meta.capiscio` namespace prevents collisions with other MCP metadata extensions.
 
 ---
 
 ## Appendix C: A2A Binding (Non-Normative)
 
-In the Agent-to-Agent (A2A) protocol, Authority Envelopes are carried as an A2A extension:
+In the Agent-to-Agent (A2A) protocol, Authority Envelopes are carried as an A2A extension per §15.3.
 
 **Agent Card Declaration:**
 
@@ -663,7 +830,7 @@ In the Agent-to-Agent (A2A) protocol, Authority Envelopes are carried as an A2A 
 }
 ```
 
-**Request Metadata:**
+**Single-Envelope request:**
 
 ```json
 {
@@ -678,6 +845,34 @@ In the Agent-to-Agent (A2A) protocol, Authority Envelopes are carried as an A2A 
 }
 ```
 
+**Multi-Envelope request (delegation chain):**
+
+```json
+{
+  "method": "message/send",
+  "params": {
+    "message": { "..." : "..." },
+    "metadata": {
+      "capiscio.authority_envelope": "<leaf_envelope_jws>",
+      "capiscio.authority_chain": ["<root_envelope_jws>", "<leaf_envelope_jws>"],
+      "capiscio.badge_map": {
+        "did:web:acme.example": "<badge_jws>",
+        "did:web:taxbot.example": "<badge_jws>"
+      },
+      "capiscio.txn_id": "018f4e1d-7e5d-7a9f-a9d2-8b6a0f2c9b11"
+    }
+  }
+}
+```
+
+**Field mapping per §15.3:**
+
+| §15 Requirement | A2A Metadata Key | Notes |
+|-----------------|------------------|-------|
+| Chain array (§15.1) | `capiscio.authority_chain` | JSON array of JWS strings, root to leaf. |
+| Badge map (§15.2) | `capiscio.badge_map` | JSON object, DID → badge JWS. |
+| Leaf Envelope | `capiscio.authority_envelope` | Single-Envelope backward compatibility. |
+
 * The extension is declared in `capabilities.extensions` per A2A extension conventions.
 * Authority data is carried in `metadata` maps on `SendMessageRequest` or `Task` objects.
 * The Trust Badge MAY be carried as a bearer token in the A2A `SecurityScheme`.
@@ -688,5 +883,8 @@ In the Agent-to-Agent (A2A) protocol, Authority Envelopes are carried as an A2A 
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.1 | 2026-05-05 | Added normative chain presentation requirements (§15.1), chain length limits (§15.1.1), badge map transport (§15.2), transport binding requirements (§15.3), and cross-organization cache revocation policy (§15.4). Updated §9.2 Step 7 to reference §15.1 for chain retrieval and §15.2 for badge resolution. Added `ENVELOPE_CHAIN_TOO_DEEP` error code (§9.3). Promoted Appendix A HTTP Binding from non-normative to normative with `X-Capiscio-Authority-Chain` and `X-Capiscio-Badge-Map` header definitions. Body-based chain transport deferred to future revision. |
+| 1.0 | 2026-04-30 | Approved. Added `prompt_summary` payload claim (§5.3, §5.4). Added empty allowlist security principle (§17.1). Added stateful constraint enforcement guidance (§8.5). Added pre-execution planning interface future work (§18). Added RFC-009 and RFC-010 relationship rows (§2). Added standing delegation clarification (§12.1). |
+| 0.3 | 2026-04-29 | Added §5.5 capability class interpretation normative note. Added §9.3 rejection error codes table with `ENVELOPE_SCOPE_INSUFFICIENT`. Added §9.3.1 structured rejection payload for scope-insufficient rejections. Updated §18 Envelope Request Protocol future work with RFC-009 forward reference. Renumbered §9.3→§9.4, §9.4→§9.5. |
 | 0.2 | 2026-02-25 | Root envelope semantics clarified (§6.1). Multi-use envelopes with invocation-layer replay (§12). PDP schema moved to RFC-005 PIP; §11 retains attribute projection only. Algorithm list relaxed (§17.2). Registry outage split into chain retrieval vs revocation (§16). EM-GUARD clarified as identity-enforced/policy-advisory (§10.2). Jailer removed. |
 | 0.1 | 2026-01-20 | Initial draft. |

@@ -1,10 +1,10 @@
 # RFC-005: PDP Integration Profile (PIP)
 
-**Version:** 1.0
-**Status:** Draft
+**Version:** 1.2
+**Status:** Approved
 **Authors:** CapiscIO Core Team
 **Created:** 2025-12-24
-**Updated:** 2026-02-25
+**Updated:** 2026-04-30
 **Requires:** RFC-002 (Trust Badge Specification), RFC-004 (Transaction and Hop Binding), RFC-008 (Delegated Authority Envelopes)
 **Supersedes:** RFC-005 v0.2 (PDEP)
 
@@ -34,6 +34,8 @@ PIP is engine-agnostic. The decision logic may reside in OPA, Cedar, cloud IAM, 
 | RFC-002 (Trust Badge) | PEP extracts `subject.did`, `subject.badge_jti`, `subject.trust_level`, and `subject.ial` from the Badge for the decision request. |
 | RFC-004 (TCHB) | PEP includes `context.txn_id` and `context.hop_id` for transaction correlation. |
 | RFC-008 (DAE) | PEP extracts envelope attributes (`capability_class`, `constraints`, `parent_constraints`, `envelope_id`, `delegation_depth`, `enforcement_mode`) for the decision request. RFC-008 §9.2 step 9 and §11 delegate the PDP wire contract to this specification. |
+| RFC-009 (Pre-Authorized Action Manifest) | RFC-009 Step 1C projects the RFC-010 classifier verdict into the PIP attribute space via the `classification.*` namespace. RFC-009 also adds `context.intent_envelope_hash` to the PDP query when an Intent Envelope is present. The PDP MAY condition policy on both attributes. |
+| RFC-010 (Intent Classification) | RFC-010 Classifier Sub-Agent output is surfaced in the `classification.*` attribute group. These attributes are advisory. See §5.1 normative constraint. |
 
 **Invariant Preservation:**
 
@@ -102,9 +104,28 @@ The PEP MUST construct a decision request containing the following attribute gro
 | `context.constraints` | Envelope `constraints` | REQUIRED if Envelope present | Constraint object for this Envelope. |
 | `context.parent_constraints` | Parent Envelope `constraints` | REQUIRED if derived Envelope | Parent constraints for narrowing validation. `null` for root Envelopes. |
 | `context.enforcement_mode` | PEP configuration | REQUIRED | Active Enforcement Mode (RFC-008 §10). |
+| `context.intent_envelope_hash` | RFC-009 Intent Envelope | OPTIONAL | SHA-256 hash of the Intent Envelope JWS governing this request. Present when the requesting agent supplied a valid Intent Envelope per RFC-009. Enables PDP policies to condition authorization on the presence and validity of a declared intent artifact. When present, the PDP MAY verify the hash against the Manifest Registry. |
 | `environment.workspace` | PEP configuration | OPTIONAL | Workspace or tenant identifier. |
 | `environment.pep_id` | PEP configuration | OPTIONAL | PEP instance identifier. |
 | `environment.time` | PEP clock | RECOMMENDED | Request evaluation time (ISO 8601). |
+| `classification.action_type` | RFC-010 Classifier | OPTIONAL | Classifier-determined action type from the five-axis taxonomy. One of: `Read`, `Write`, `Execute`, `Orchestrate`, `Provision`. Present only when RFC-010 is active and the classifier produced a result within the session timeout. |
+| `classification.action_type_confidence` | RFC-010 Classifier | OPTIONAL | Per-axis confidence score in [0.0, 1.0] for the Action Type classification. |
+| `classification.boundary` | RFC-010 Classifier | OPTIONAL | Classifier-determined boundary classification. One of: `Local`, `Intra-org`, `External`. |
+| `classification.boundary_confidence` | RFC-010 Classifier | OPTIONAL | Per-axis confidence score in [0.0, 1.0] for the Boundary classification. |
+| `classification.sensitivity` | RFC-010 Classifier | OPTIONAL | Classifier-determined data sensitivity tier. Present only when the Extended Axis Profile is active and a data catalog integration is configured. |
+| `classification.sensitivity_confidence` | RFC-010 Classifier | OPTIONAL | Per-axis confidence score for Sensitivity. Present only when the Extended Axis Profile is active. |
+| `classification.scale` | RFC-010 Classifier | OPTIONAL | Classifier-determined scale classification. Present only when the Extended Axis Profile is active. Advisory only. |
+| `classification.scale_confidence` | RFC-010 Classifier | OPTIONAL | Per-axis confidence score for Scale. Present only when the Extended Axis Profile is active. |
+| `classification.reversibility` | RFC-010 Classifier | OPTIONAL | Classifier-determined reversibility classification. Present only when the Extended Axis Profile is active. Advisory only. |
+| `classification.reversibility_confidence` | RFC-010 Classifier | OPTIONAL | Per-axis confidence score for Reversibility. Present only when the Extended Axis Profile is active. |
+| `classification.composite_confidence` | RFC-010 Classifier | OPTIONAL | Composite confidence score in [0.0, 1.0] across all active axes. |
+| `classification.capability_class_match` | RFC-010 Classifier | OPTIONAL | Boolean. Whether the classifier verdict is consistent with the capability class declared on the Intent Envelope. |
+
+**Normative Constraint on `classification.*` Attributes:**
+
+`classification.*` attributes are produced by the RFC-010 Classifier Sub-Agent and represent probabilistic advisory signal. PDP policy authors MUST NOT use `classification.*` attributes as the sole condition in a DENY rule. A PEP that detects a PDP denial based exclusively on `classification.*` fields with no corroborating deterministic attribute (capability class, manifest binding, or envelope constraint) MUST emit a `CLASSIFIER_SOLE_DENY_VIOLATION` warning event and treat the decision as if RFC-010 enrichment were absent, re-evaluating against deterministic attributes only.
+
+The purpose of this constraint is to prevent policy drift: as RFC-010 matures, operators may be tempted to treat classifier-derived attributes as authoritative. They are not. They are enrichment signals. All deterministic authorization invariants are expressed through RFC-008 Authority Envelopes, RFC-009 Action Manifests, and the Capability Binding Registry.
 
 ### 5.2 Example Request
 
@@ -522,6 +543,7 @@ These policies serve as working examples and a starting point for customization.
 
 | Version | Date | Changes |
 |---|---|---|
+| 1.2 | 2026-04-30 | Added `context.intent_envelope_hash` attribute (§5.1). Added `classification.*` attribute namespace with per-axis confidence scores (§5.1). Added normative constraint on classifier output usage (§5.1). Added RFC-009 and RFC-010 relationship rows (§2). |
 | 1.1 | 2026-03-21 | Non-normative additions: §4.2 implementation note on bundle-based PDP internals, §6.3 note distinguishing bundle-level from decision-level caching, Appendix B documenting reference PDP architecture (OPA embed, PIP-to-OPA mapping, bundle structure, staleness behavior, starter policies). |
 | 1.0 | 2026-02-25 | Complete rewrite: PDEP replaced with PDP Integration Profile (PIP). Removed policy bundles, distribution, PAP, offline evaluation. Added envelope-aware decision request schema (§5), constraint narrowing as PDP responsibility (§8), enforcement mode obligation matrix (§7.2), decision caching temporal bounds (§6.3), PEP narrowing misconfiguration guard (§8.3), EM-OBSERVE PDP unavailability exception (§7.4), break-glass deterministic PDP skip (§9.2). Obligation types demoted to non-normative appendix. |
 | 0.2 | 2026-01-02 | (PDEP) Bundle signing format, digest canonicalization, SSRF hardening, override token claims. |

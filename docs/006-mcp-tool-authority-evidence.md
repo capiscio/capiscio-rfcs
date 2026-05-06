@@ -1,7 +1,7 @@
 # RFC-006: MCP Tool Authority and Evidence
 
-**Version:** 0.4
-**Status:** Draft
+**Version:** 1.0
+**Status:** Approved
 **Authors:** CapiscIO Core Team
 **Created:** 2026-01-14
 **Updated:** 2026-02-25
@@ -366,6 +366,9 @@ to allow future evolution without breaking compliance.
 ---
 
 ## 12. Changelog
+
+* **v1.0**
+  Approved. No normative changes from v0.4.
 
 * **v0.4**
   Authority Envelope awareness (RFC-008): envelope verification algorithm (§6.2.1), `badge+envelope` assurance tier (§5.3), envelope-sourced evidence log fields and error codes, RFC-005 PDEP→PIP reference update.

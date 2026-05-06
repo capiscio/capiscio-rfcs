@@ -1,7 +1,7 @@
 # RFC-004: CapiscIO Transaction and Hop Binding Protocol (TCHB)
 
-**Version:** 0.4
-**Status:** Draft
+**Version:** 1.0
+**Status:** Approved
 **Authors:** CapiscIO Core Team
 **Created:** 2025-12-24
 **Updated:** 2026-02-25
@@ -562,7 +562,6 @@ Content-Type: application/json
 ## Changelog
 
 | Version | Date | Changes |
-|---------|------|---------|
-| 0.4 | 2026-02-25 | Authority Envelope binding: `authority_envelope_hash` claim (§8.7), verification step (§9.2), telemetry field (§10.1), RFC relationship table (§1.1). |
+|---------|------|---------|| 1.0 | 2026-04-30 | Approved. No normative changes from 0.4. || 0.4 | 2026-02-25 | Authority Envelope binding: `authority_envelope_hash` claim (§8.7), verification step (§9.2), telemetry field (§10.1), RFC relationship table (§1.1). |
 | 0.3 | 2026-01-02 | **Added:** `iss == badge.sub` semantic binding (§9.2 step 7); MCP `htu` canonicalization (§6.3); explicit percent-encoding algorithm. **Changed:** `aud` → `target_aud` to distinguish from RFC-002 Badge `aud`. **Fixed:** Query normalization rules (sorting, encoding, `%20` not `+`); parent hash audit obligation note; replay cache upgraded to SHOULD. |
 | 0.2 | 2025-12-24 | Initial draft. |

@@ -1,7 +1,7 @@
 # RFC-007: MCP Server Identity Disclosure and Verification
 
-**Version:** 0.4  
-**Status:** Draft  
+**Version:** 1.0
+**Status:** Approved
 **Authors:** CapiscIO Core Team  
 **Created:** 2026-01-15  
 **Updated:** 2026-01-15  
@@ -317,6 +317,7 @@ Rules:
 
 | Version | Date       | Changes                                                                                         |
 | ------- | ---------- | ----------------------------------------------------------------------------------------------- |
+| 1.0     | 2026-04-30 | Approved. No normative changes from 0.4.                                                        |
 | 0.4     | 2026-01-15 | Expanded origin binding for HTTP, stdio, and gateway patterns. Added path binding for multi-server deployments. |
 | 0.3     | 2026-01-15 | Distinguished `UNVERIFIED_ORIGIN` from Trust Level 0. Added error codes. Editorial cleanup.     |
 | 0.2     | 2026-01-15 | Aligned headers to `Capiscio-Server-*`. Added revocation. Added changelog. Structural refactor. |

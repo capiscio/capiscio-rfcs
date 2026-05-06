@@ -1,10 +1,10 @@
 # RFC-001: Agent Governance Control Plane (AGCP)
 
-**Version:** 1.0
+**Version:** 1.1
 **Status:** Approved
 **Authors:** CapiscIO Core Team
 **Created:** 2025-12-05
-**Updated:** 2025-12-05
+**Updated:** 2026-04-30
 
 ---
 
@@ -19,6 +19,12 @@ To establish **CapiscIO** as the enforcement plane for **Level 2 Agentic Context
 > **Level 1 risks are prompt injection. Level 2 risks are when Agent B empties your bank account because Agent A asked it to "help with finances."**
 > We are not a firewall for hallucinations; we are the control plane for systems of interacting agents.
 
+**Governing Principle:**
+
+> **"LLMs can propose actions. They cannot define what is allowed."**
+
+CapiscIO treats the LLM layer as an untrusted signal source. All authorization decisions are made by the deterministic enforcement plane — the Policy Enforcement Point (PEP) — operating against cryptographically verifiable artifacts. No LLM output, reasoning trace, or chain-of-thought can authorize an action. Declared intent, not inferred intent, governs what agents are permitted to do.
+
 ### 1.2 Threat Model Summary
 
 | Threat | Status | Mechanism |
@@ -26,9 +32,11 @@ To establish **CapiscIO** as the enforcement plane for **Level 2 Agentic Context
 | **Authority Escalation** | 🛡️ **Blocked** | Transitive Intersection (Golden Rule) |
 | **Context/Orchestration Drift** | 🛡️ **Blocked** | Signed Trace ID + Intent Locking |
 | **Forged Delegation** | 🛡️ **Blocked** | SVID Signature Validation |
+| **Confused Deputy** | 🛡️ **Blocked** | Monotonic narrowing via Authority Envelopes (RFC-008); a high-privilege agent cannot be manipulated by a low-privilege caller into exercising authority the caller does not hold. Delegation chains are cryptographically bound. |
 | **Rogue/Revoked Agent** | 🛡️ **Blocked** | Short-lived TTL + Revocation Lists |
 | **Prompt Injection** | ❌ *Out of Scope* | Handled by Model Firewall |
 | **Data Exfiltration** | ❌ *Out of Scope* | Handled by DLP / Egress Filtering |
+| **LLM-based authorization bypass** | 🛡️ **Blocked by design** | RFC-010 classifier outputs are advisory signal only. They MUST NOT be the sole basis for a DENY decision. The RFC-009 PEP is the sole authoritative enforcement boundary. Classifier verdicts enrich enforcement; they do not make authorization decisions. |
 
 ### 1.3 What CapiscIO Is NOT
 
@@ -58,6 +66,12 @@ We abstract implementation complexity into a single, verifiable security guarant
 - **Human Originator:** Intent is derived from a verifiable user action (authenticated via IdP).
 - **System Originator:** Intent must be **declared and signed** before execution.
     - *Example:* A nightly batch job declares intent `generate_quarterly_report` and is signed by `system:finance-automation`. Any agent invoked by this job inherits this scope and cannot exceed it.
+
+**Scope Boundary — Automated Intent Classification:**
+
+CapiscIO does not perform automated intent classification from natural language requests. Reliable automated mapping of open-ended natural language to bounded, cryptographically enforceable capability classes is an unsolved problem in the general case. CapiscIO solves the enforcement layer: given a declared intent, enforce it deterministically. How a system maps a user's expressed goal to a declared capability class before issuing an Authority Envelope (RFC-008) is the responsibility of the orchestration layer above CapiscIO.
+
+For purpose-built agents with bounded tool surfaces, declared intent is specified at registration time via the Pre-Authorized Action Manifest (RFC-009). For open-ended conversational agents, the orchestration layer must supply a structured intent declaration before root envelope issuance. CapiscIO enforces what is declared; it does not classify what was meant.
 
 ---
 
@@ -166,4 +180,5 @@ Identities and policies must be revocable mid-flight.
 
 ## Changelog
 
+- **v1.1 (2026-04-30):** Added Governing Principle statement (§1.1). Added Confused Deputy and LLM-based authorization bypass threat rows (§1.2). Added intent classification scope boundary (§2.2).
 - **v1.0 (2025-12-05):** Initial public release
