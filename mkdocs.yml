@@ -13,4 +13,6 @@ nav:
   - RFC-006 MCP Tool Authority: 006-mcp-tool-authority-evidence.md
   - RFC-007 MCP Server Identity: 007-mcp-server-identity-discovery.md
   - RFC-008 Delegated Authority Envelopes: 008-delegated-authority-envelopes.md
+  - RFC-009 Pre-Authorized Action Manifest: 009-pre-authorized-action-manifest.md
+  - RFC-010 Intent Classification: 010-intent-classification-policy-intelligence.md
   - Contributing: CONTRIBUTING.md
