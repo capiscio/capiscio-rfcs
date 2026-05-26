@@ -292,7 +292,7 @@ This appendix provides concrete examples illustrating how the Verification Local
 
 **Operational Notes:**
 
-- The revocation list is stale (deployment date), which is acceptable per §2.3.2 ("Revocation MAY use cached data")
+- The revocation list is stale (deployment date), which is acceptable per §2.3 (Revocation MAY use cached data)
 - This is the "Offline Operation" profile — first-class, not degraded mode
 
 ### A.2 Cached Revocation Validation

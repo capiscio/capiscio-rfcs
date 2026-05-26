@@ -35,8 +35,8 @@ These RFCs define how trust decisions are made and enforced at system boundaries
 |-----|-------|--------|---------|
 | [RFC-001](001-agcp.md) | Agent Governance Control Plane | ✅ Approved | Architecture overview — Trace & Enforce pattern |
 | [RFC-005](005-policy-definition-distribution-enforcement.md) | PDP Integration Profile | ✅ Approved | Policy engine integration (OPA, Cedar) |
-| [RFC-009](009-pep-specification.md) | Policy Enforcement Point | ✅ Approved | PEP specification — the enforcement boundary |
-| [RFC-010](010-intent-classification.md) | Intent Classification | ✅ Approved | Advisory classifier signals (NOT authorization) |
+| [RFC-009](009-pre-authorized-action-manifest.md) | Pre-Authorized Action Manifest | 📝 Draft | Action manifest protocol for pre-authorization |
+| [RFC-010](010-intent-classification-policy-intelligence.md) | Intent Classification and Policy Intelligence | 📝 Draft | Advisory classifier signals (NOT authorization) |
 | [RFC-011](011-runtime-event-semantics.md) | Runtime Event Semantics | 📝 Draft | Authority transition events for audit and compliance |
 
 ### MCP Integration

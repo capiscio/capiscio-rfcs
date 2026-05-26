@@ -32,7 +32,7 @@ This specification defines:
 | RFC-001 (AGCP) | Defines the Trace & Enforce pattern. Events record enforcement decisions made per §4.2. Events reference `trace_id` from RFC-001 §3.2. |
 | RFC-002 (Trust Badge) | Identity events reference badge `jti`. Verification events record badge verification outcomes. |
 | RFC-004 (TCHB) | Events carry `txn_id` and `hop_id` to link to the transport-layer hop chain. |
-| RFC-008 (DAE) | Authority events reference `authority_envelope_hash`. Delegation events record envelope issuance. |
+| RFC-008 (DAE) | Authority events reference `envelope_hash`. Delegation events record envelope issuance. |
 | RFC-009 (PEP Spec) | PEP implementations MUST emit the events defined in this RFC at the specified emission points. |
 
 ---
@@ -329,7 +329,7 @@ This RFC defines event semantics using JSON for human readability. However, for 
 3. JSON representations MUST be derivable from protobuf messages without semantic loss.
 4. SDK implementations MUST generate language-native types from the canonical protobuf schema to prevent semantic drift.
 
-**Schema location:** The canonical `.proto` file is maintained at `capiscio-rfcs/proto/event.proto` (non-normative reference; proto definition is normative when published).
+**Schema location:** The canonical `.proto` file will be maintained at `capiscio-rfcs/proto/event.proto` (TBD; proto definition becomes normative when published).
 
 ---
 
@@ -401,7 +401,7 @@ Audit systems consume events for compliance and forensic analysis. They SHOULD:
 
 * Persist events for the required compliance retention period
 * Index by `trace_id`, `subject_did`, `event_type`, and `timestamp`
-* Support reconstruction of authority chains from `authority.*` events
+* Support reconstruction of enforcement decisions and provenance from `authority.*` events (note: authority chain validation requires separate verification of badges and envelopes per §4.4)
 * Verify event signatures when present
 
 ### 8.2 Compliance Dashboards
