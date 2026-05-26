@@ -1,10 +1,10 @@
 # RFC-002: CapiscIO Trust Badge Specification
 
-**Version:** 1.4
+**Version:** 1.5
 **Status:** Approved
 **Authors:** CapiscIO Core Team
 **Created:** 2025-12-09
-**Updated:** 2026-01-02
+**Updated:** 2026-05-26
 **Requires:** RFC-001 (AGCP), RFC-003 (Key Ownership Proof Protocol, for IAL-1)
 
 ---
@@ -14,6 +14,8 @@
 This RFC defines the **CapiscIO Trust Badge**, the cryptographic identity credential for AI agents in the CapiscIO ecosystem. Trust Badges are signed JSON Web Tokens (JWS) that provide portable, verifiable identity for agents participating in AGCP-governed workflows.
 
 Trust Badges implement the SVID (Secure Verifiable Identity Document) concept referenced in RFC-001 §4.2, enabling the cryptographic signature validation required for delegation chain integrity.
+
+Badges are designed as **self-verifiable artifacts**. A verifier in possession of the badge and the issuer's public key material can validate authenticity, integrity, and all claims without network access to the issuing authority. This property is foundational to the architecture and is governed by the Verification Locality Principle (RFC-001 §2.3).
 
 ---
 
@@ -27,6 +29,11 @@ Trust Badges implement the SVID (Secure Verifiable Identity Document) concept re
 | Revocation Lists | Badge `jti` + revocation endpoint |
 | Trust Graph membership | Badge `iss` (CA) + `vc.credentialSubject.level` |
 | Delegation Chain signing | Agent signs with key from Badge |
+| Verification Locality (§2.3) | Badge is self-verifiable with cached issuer JWKS; no synchronous registry call required |
+
+**Verification Locality:**
+
+Per RFC-001 §2.3, badge verification MUST NOT require synchronous interaction with the Registry or any centralized service. The badge's JWS format, embedded `key` claim, and JWKS-based issuer key distribution are designed to satisfy this principle. Issuance is an online, coordinated operation (the CA signs the badge). Verification is a local, offline-capable operation (the verifier checks the signature against cached issuer keys). These are strictly separate architectural concerns.
 
 **Invariant Preservation:**
 
@@ -1386,6 +1393,15 @@ Response:
 }
 ```
 
+**Revocation Distribution Model:**
+
+Revocation is a **distributed data stream**, not a synchronous per-verification callback. The Registry maintains authoritative revocation state and distributes it via cacheable endpoints. Verifiers consume revocation data into a local cache and verify against that cache — never via a synchronous call to the Registry during badge verification (per RFC-001 §2.3).
+
+Distribution channels:
+
+- **Pull:** PEPs periodically sync against the bulk revocation list endpoint (`GET {iss}/v1/revocations?since=...`). Default interval: 30 seconds.
+- **Push (future):** Real-time notification channel for "Emergency Stop" events. Sub-second propagation for critical revocations.
+
 **Cache Staleness Guidance:**
 
 **Named Constants (Normative):**
@@ -1397,12 +1413,12 @@ Response:
 
 Verifiers operating in offline or semi-connected mode MUST:
 
-1. Prioritize the `jti` check from their local revocation cache.
+1. Verify revocation status against their **local revocation cache**, not via synchronous per-verification callbacks to the Registry.
 2. If the cache is stale (older than `REVOCATION_CACHE_MAX_STALENESS`) AND network is available, attempt to sync revocations before treating a previously unseen `jti` as valid.
 3. **Fail-closed default (normative):** If sync fails and the cache is stale, verifiers MUST reject badges for trust levels 2–4 with error `REVOCATION_CHECK_FAILED`. Verifiers MAY proceed with stale cache only for levels 0–1 or when explicitly configured for fail-open mode.
 4. Implementations MAY configure a longer `REVOCATION_CACHE_MAX_STALENESS` for air-gapped deployments, but MUST document the deviation and its security implications.
 
-This ensures consistent security posture across implementations while allowing operational flexibility for edge cases.
+This ensures consistent security posture across implementations while allowing operational flexibility for edge cases. The model follows PKI conventions: the CA issues and revokes; verifiers check cached CRL/status data locally.
 
 ---
 
@@ -1456,6 +1472,31 @@ This ensures consistent security posture across implementations while allowing o
 | **Online** (levels 1–4) | Fetch from `{iss}/.well-known/jwks.json` | Real-time API call | High-security, always-connected |
 | **Offline** (levels 1–4) | Pre-loaded CA JWK | Local cache (sync periodically) | Air-gapped, edge, latency-sensitive |
 | **Self-signed** (level 0) | Local trust store | None (TTL-based only) | Development, testing, demos |
+
+#### 8.2.1 Offline Operation Profile
+
+Offline verification is a **first-class operational profile**, not a degraded or fallback mode. The badge format is specifically designed so that all information required for verification — the signed claims, the embedded subject key, and the issuer's key identity (`kid`) — is carried in the artifact itself.
+
+A verifier initialized with the issuer's JWKS and a revocation cache operates at full trust fidelity without network access. There is no "reduced assurance" in offline mode; the cryptographic guarantees are identical to online mode. The only difference is revocation currency, which is governed by cache staleness policy (§7.5).
+
+**Normative Requirements for Offline Operation:**
+
+1. SDK and library implementations MUST provide a verification API that operates without network access when initialized with issuer key material and a revocation snapshot.
+2. Implementations MUST NOT require online connectivity as a precondition for verification API initialization.
+3. The verification result MUST be identical for online and offline modes given the same badge, issuer keys, and revocation state. There is no separate "offline result" type or reduced-assurance indicator.
+4. Implementations SHOULD support pre-loading issuer JWKS from local files, environment variables, or configuration bundles — not only from network endpoints.
+5. Implementations SHOULD support pre-loading revocation snapshots from local files or configuration bundles for air-gapped deployments.
+
+**Operational Scenarios:**
+
+| Scenario | Issuer Keys | Revocation Data | Badge Verification |
+|----------|------------|-----------------|-------------------|
+| Edge deployment | Bundled at deploy time | Bundled or periodic sync | Full fidelity |
+| Air-gapped network | Pre-provisioned | Pre-provisioned snapshot | Full fidelity |
+| Intermittent connectivity | Cached, refreshed when online | Cached, refreshed when online | Full fidelity |
+| Satellite / IoT | Embedded in firmware | TTL-based only (level 0) | Full fidelity |
+
+This profile aligns with the Verification Locality Principle (RFC-001 §2.3): issuance is centralized, verification is local.
 
 ### 8.3 Audience Validation
 
@@ -2458,7 +2499,7 @@ curl https://api.example.com/v1/task \
 
 | Version | Date | Changes |
 |---------|-----------|---------|
-| 1.5 | 2026-01-XX | **Clarified:** DV order authentication is a deployment choice (§7.2.4); registries MAY require authentication. **Added:** Hosted Registry Policy note; Domain Ownership Policy (prevents simultaneous multi-account verification of same domain). |
+| 1.5 | 2026-05-26 | **Added:** Self-verifiable artifact statement in Abstract; Verification Locality cross-reference in §2; Offline Operation Profile as first-class operational profile (§8.2.1). **Tightened:** Revocation distribution model language in §7.5 — revocation as distributed data stream, not synchronous callback; explicit local cache verification requirement. **Cross-references:** RFC-001 §2.3 (Verification Locality Principle). **Clarified:** DV order authentication is a deployment choice (§7.2.4); registries MAY require authentication. **Added:** Hosted Registry Policy note; Domain Ownership Policy (prevents simultaneous multi-account verification of same domain). |
 | 1.4 | 2026-01-02 | **Added:** Development and Testing (§16); Deployment Profiles (§17); test vectors TV-013/TV-014 for levels 1-2. **Clarified:** Exact-match requirement for DV domain anchoring (§7.2.6); `.invalid` TLD MUST be rejected in production profiles; test vector path stability guarantee. **Updated:** Test vector canonical location (now maintained in `capiscio-e2e-tests`). |
 | 1.3 | 2025-12-23 | **Added:** Persistent DV Accounts (§7.3, OPTIONAL); Conformance section (§14) with test vectors. **Fixed:** IAL-0 key source rules; PoP key resolution anchor; CA did:web SSRF (MUST); `kid` selection semantics; staleness fail-closed default; Phase 4 DID resolution; SSRF baseline unified. |
 | 1.2 | 2025-12-22 | **Added:** Anonymous DV issuance (§7.2.3–7.2.7); ACME-Lite protocol; grant-based minting; SSRF hardening; error codes (§12.6–12.7). **Fixed:** Trust level as string; `aud` as array; `iss` HTTPS for levels 1–4; clock skew; replay retention; IAL semantics. |
