@@ -1,6 +1,6 @@
 # RFC-011: Runtime Event Semantics
 
-**Version:** 1.0
+**Version:** 1.1
 **Status:** Draft
 **Authors:** CapiscIO Core Team
 **Created:** 2026-05-26
@@ -91,6 +91,62 @@ This aligns with the Verification Locality Principle (RFC-001 §2.3): runtime op
 
 Implementations MAY forward CapiscIO events to observability systems (OTLP, Datadog, etc.) for correlation, but the event schema and emission rules are defined by this RFC, not by observability conventions.
 
+### 4.4 Events Are Not Authority
+
+**Events are evidence artifacts, not authority artifacts.**
+
+This distinction is critical for security:
+
+| Property | Events | Authority Artifacts (Badges, Envelopes) |
+|----------|--------|----------------------------------------|
+| Purpose | Record decisions | Grant permissions |
+| Replayability | Non-replayable | Replayable within validity window |
+| Authorization | Cannot authorize execution | Can authorize execution |
+| Source of truth | Observational evidence | Authoritative grant |
+| Verification | Optional (for integrity) | Required (for access) |
+
+**Normative requirements:**
+
+1. Events MUST NOT be used as inputs to authorization decisions.
+2. Events MUST NOT be replayed to reconstruct or infer authority.
+3. Authority originates ONLY from valid trust artifacts (badges, envelopes) per RFC-002 and RFC-008.
+4. An event stream MUST NOT independently authorize execution — it describes execution that was authorized by other means.
+5. Systems MUST NOT treat event reconstruction as equivalent to delegation chain validation.
+
+**Rationale:** Without this separation, future implementations may accidentally replay event streams to infer authority, reconstruct delegation semantics from evidence, or treat logs as execution rights. This would undermine the integrity of badge semantics, envelope semantics, and PEP decisions.
+
+### 4.5 Runtime Portability
+
+**Event semantics are runtime-portable and framework-agnostic.**
+
+The event taxonomy defined in §5 MUST normalize authority-relevant transitions across all runtime environments:
+
+* LangGraph
+* OpenAI Agents SDK
+* MCP servers and clients
+* CrewAI
+* AutoGen
+* Custom agent runtimes
+* Edge and embedded runtimes
+
+This portability is foundational: multi-runtime ecosystems require shared trust semantics, shared delegation semantics, and shared provenance semantics. RFC-011 events provide the canonical vocabulary for authority mediation across heterogeneous runtimes.
+
+### 4.6 Mediation Boundary Scope
+
+**Event semantics describe mediation boundaries, not internal framework behavior.**
+
+CapiscIO events model authority-relevant transitions at enforcement boundaries. They do NOT model:
+
+* Internal scheduler decisions within a framework
+* Memory management or context window operations
+* Prompt construction or response parsing
+* Framework-specific orchestration internals
+* Transport-layer retries or connection management
+
+**Normative requirement:** Implementations MUST NOT emit CapiscIO events for framework-internal operations that do not cross an authority mediation boundary. If an operation does not involve an identity verification, authority decision, enforcement action, or trust operation, it is not a CapiscIO event.
+
+This ensures that internal runtime details (LangGraph scheduling, OpenAI agent internals, MCP transport mechanics) do not leak into the canonical event stream.
+
 ---
 
 ## 5. Event Taxonomy
@@ -146,17 +202,35 @@ Tool events record MCP tool invocation decisions.
 
 Resource events record access to protected resources.
 
+**Payload Canonicalization (REQUIRED):**
+
+Resource event payloads MUST use canonicalized representations, NOT raw values. Raw URLs, filesystem paths, and shell commands can contain secrets, tokens, credentials, PII, or sensitive query parameters. Emitting raw values creates an accidental secret-exfiltration channel.
+
+| Raw Field | Canonicalized Representation |
+|-----------|-----------------------------|
+| URL | `target_host`, `target_port`, `scheme`, `path_classification` |
+| Filesystem path | `path_classification`, `path_hash`, `operation` |
+| Shell command | `command_hash`, `command_classification` |
+
+**Canonicalization rules:**
+
+1. **Network targets:** Emit `scheme`, `target_host`, `target_port`, and a normalized `path_classification` (e.g., `/api/v1/*`). MUST NOT emit query parameters, fragments, or credentials embedded in URLs.
+2. **Filesystem paths:** Emit `path_classification` (e.g., `/home/user/documents/*`) and optionally `path_hash` (SHA-256 of full path). MUST NOT emit full paths that may contain usernames, customer identifiers, or secrets.
+3. **Shell commands:** Emit `command_hash` (SHA-256 of full command) and `command_classification` (e.g., `git`, `curl`, `database-cli`). MUST NOT emit raw command strings which may contain credentials or secrets.
+
+Implementations MAY provide a separate audit channel for full raw values under strict access control, but the standard event stream MUST use canonicalized payloads.
+
 | Event Type | Trigger | Payload |
 |------------|---------|---------|
-| `resource.network.requested` | Network access requested | `target_url`, `method`, `subject_did` |
-| `resource.network.permitted` | Network access allowed | `target_url`, `method` |
-| `resource.network.denied` | Network access blocked | `target_url`, `method`, `reason` |
-| `resource.filesystem.requested` | Filesystem access requested | `path`, `operation`, `subject_did` |
-| `resource.filesystem.permitted` | Filesystem access allowed | `path`, `operation` |
-| `resource.filesystem.denied` | Filesystem access blocked | `path`, `operation`, `reason` |
-| `resource.shell.requested` | Shell execution requested | `command_hash`, `subject_did` |
-| `resource.shell.permitted` | Shell execution allowed | `command_hash` |
-| `resource.shell.denied` | Shell execution blocked | `command_hash`, `reason` |
+| `resource.network.requested` | Network access requested | `scheme`, `target_host`, `target_port`, `path_classification`, `method`, `subject_did` |
+| `resource.network.permitted` | Network access allowed | `scheme`, `target_host`, `target_port`, `path_classification`, `method` |
+| `resource.network.denied` | Network access blocked | `scheme`, `target_host`, `path_classification`, `method`, `reason` |
+| `resource.filesystem.requested` | Filesystem access requested | `path_classification`, `path_hash`, `operation`, `subject_did` |
+| `resource.filesystem.permitted` | Filesystem access allowed | `path_classification`, `path_hash`, `operation` |
+| `resource.filesystem.denied` | Filesystem access blocked | `path_classification`, `operation`, `reason` |
+| `resource.shell.requested` | Shell execution requested | `command_hash`, `command_classification`, `subject_did` |
+| `resource.shell.permitted` | Shell execution allowed | `command_hash`, `command_classification` |
+| `resource.shell.denied` | Shell execution blocked | `command_hash`, `command_classification`, `reason` |
 
 ### 5.6 Trust Events
 
@@ -233,6 +307,30 @@ Events MAY be signed for integrity and non-repudiation. When signed:
 3. The signing key SHOULD be the emitting component's key (for sidecars/PEPs) or the agent's key (for SDKs).
 4. Signature verification is OPTIONAL for consumers; signed events provide higher assurance for compliance scenarios.
 
+### 6.5 Wire Representation Strategy
+
+**Canonical wire format:** Protocol Buffers (protobuf)
+
+**Representational format:** JSON
+
+This RFC defines event semantics using JSON for human readability. However, for production wire transport, Protocol Buffers is the canonical serialization format.
+
+| Concern | Format | Rationale |
+|---------|--------|----------|
+| Specification | JSON | Human-readable, easy to review |
+| Wire transport | Protobuf | Compact, schema-enforced, streaming-friendly |
+| SDK APIs | Language-native | Generated from protobuf schema |
+| Debugging/logging | JSON | Human inspection |
+
+**Normative requirements:**
+
+1. Implementations targeting federation, high-throughput streaming, or cross-runtime interoperability SHOULD use protobuf for wire transport.
+2. The protobuf schema MUST be semantically equivalent to the JSON structure defined in §6.1.
+3. JSON representations MUST be derivable from protobuf messages without semantic loss.
+4. SDK implementations MUST generate language-native types from the canonical protobuf schema to prevent semantic drift.
+
+**Schema location:** The canonical `.proto` file is maintained at `capiscio-rfcs/proto/event.proto` (non-normative reference; proto definition is normative when published).
+
 ---
 
 ## 7. Emission Points
@@ -271,6 +369,27 @@ SDK implementations (e.g., `capiscio.guard()` wrappers) SHOULD emit:
 | Emission is synchronous | SHOULD | Events SHOULD be emitted before the triggering operation returns. |
 | Emission does not block | MUST | Event emission MUST NOT block on network I/O. Local buffering is acceptable. |
 | Order preserved | SHOULD | Events from a single emitter SHOULD be delivered in emission order. |
+
+### 7.4 Event Ordering
+
+This RFC does NOT require total ordering across distributed emitters. Global sequencing would introduce unacceptable operational complexity (distributed consensus, clock synchronization).
+
+**Local ordering guarantees:**
+
+1. Emitters SHOULD preserve **local causal ordering** for events generated within a single execution boundary.
+2. If event A causally precedes event B at the same emitter, A SHOULD be emitted before B.
+3. Timestamps SHOULD be monotonically increasing within a single emitter process.
+4. Consumers MUST NOT assume total ordering across emitters.
+
+**Cross-emitter correlation:**
+
+For events spanning multiple emitters (e.g., a delegation chain across agents), correlation is achieved via:
+
+* `context.trace_id` — links events to the same originator workflow
+* `context.txn_id` — links events to the same transaction
+* `context.hop_id` — links events to the same hop in a delegation chain
+
+These identifiers enable causal reconstruction without requiring global ordering.
 
 ---
 
@@ -333,6 +452,29 @@ High-frequency event emission can overwhelm consumers. Implementations SHOULD:
 * Rate-limit event emission per component
 * Use backpressure signals from event transport
 
+### 9.4 Retention and Privacy Classification
+
+Different event categories have different retention, privacy, and durability requirements. This section provides classification guidance; detailed retention policies are deployment-specific.
+
+| Event Category | Sensitivity | Retention Guidance | Privacy Notes |
+|----------------|-------------|-------------------|---------------|
+| Identity | Medium | Compliance window (1-7 years) | Contains DIDs; may link to external identity |
+| Authority | Medium | Compliance window | Contains capability grants; audit-critical |
+| Runtime | Low | Short-term (30-90 days) | Operational lifecycle; minimal PII |
+| Tool | Medium | Compliance window | Tool names may reveal business logic |
+| Resource (network) | **High** | Compliance window + privacy review | Host/path patterns may reveal sensitive integrations |
+| Resource (filesystem) | **High** | Compliance window + privacy review | Path patterns may contain customer identifiers |
+| Resource (shell) | **Critical** | Compliance window + security review | Command hashes may correlate to sensitive operations |
+| Trust | Low | Compliance window | Cryptographic operations; low PII |
+
+**Normative guidance:**
+
+1. Implementations SHOULD classify events by sensitivity tier at emission time.
+2. Resource events (network, filesystem, shell) SHOULD receive additional privacy review before long-term retention.
+3. Deployments in regulated industries (healthcare, finance) MUST define explicit retention policies per event category.
+4. Event archives SHOULD support selective deletion to comply with data subject access requests (DSAR) where applicable.
+5. Shell and filesystem events SHOULD be stored in access-controlled partitions due to elevated sensitivity.
+
 ---
 
 ## 10. Implementation Notes
@@ -391,4 +533,5 @@ An SDK implementation conforms to this RFC if it:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.1 | 2026-05-26 | Leadership refinements: §4.4 Events Are Not Authority (critical security clarification), §4.5 Runtime Portability, §4.6 Mediation Boundary Scope, §5.5 canonicalized resource payloads, §6.5 Wire Representation Strategy (protobuf canonical), §7.4 Event Ordering, §9.4 Retention and Privacy Classification |
 | 1.0 | 2026-05-26 | Initial draft |
